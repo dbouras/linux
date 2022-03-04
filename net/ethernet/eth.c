@@ -15,23 +15,24 @@
  *		Alan Cox, <gw4pts@gw4pts.ampr.org>
  *
  * Fixes:
- *		Mr Linux	: Arp problems
- *		Alan Cox	: Generic queue tidyup (very tiny here)
- *		Alan Cox	: eth_header ntohs should be htons
- *		Alan Cox	: eth_rebuild_header missing an htons and
- *				  minor other things.
- *		Tegge		: Arp bug fixes.
- *		Florian		: Removed many unnecessary functions, code cleanup
- *				  and changes for new arp and skbuff.
- *		Alan Cox	: Redid header building to reflect new format.
- *		Alan Cox	: ARP only when compiled with CONFIG_INET
- *		Greg Page	: 802.2 and SNAP stuff.
- *		Alan Cox	: MAC layer pointers/new format.
- *		Paul Gortmaker	: eth_copy_and_sum shouldn't csum padding.
- *		Alan Cox	: Protect against forwarding explosions with
- *				  older network drivers and IFF_ALLMULTI.
- *	Christer Weinigel	: Better rebuild header message.
- *             Andrew Morton    : 26Feb01: kill ether_setup() - use netdev_boot_setup().
+ *		Mr Linux		: Arp problems
+ *		Alan Cox		: Generic queue tidyup (very tiny here)
+ *		Alan Cox		: eth_header ntohs should be htons
+ *		Alan Cox		: eth_rebuild_header missing an htons and
+ *					  minor other things.
+ *		Tegge			: Arp bug fixes.
+ *		Florian			: Removed many unnecessary functions, code cleanup
+ *					  and changes for new arp and skbuff.
+ *		Alan Cox		: Redid header building to reflect new format.
+ *		Alan Cox		: ARP only when compiled with CONFIG_INET
+ *		Greg Page		: 802.2 and SNAP stuff.
+ *		Alan Cox		: MAC layer pointers/new format.
+ *		Paul Gortmaker		: eth_copy_and_sum shouldn't csum padding.
+ *		Alan Cox		: Protect against forwarding explosions with
+ *					  older network drivers and IFF_ALLMULTI.
+ *		Christer Weinigel	: Better rebuild header message.
+ *		Andrew Morton		: 26Feb01: kill ether_setup() - use netdev_boot_setup().
+ *		Dimitrios Bouras	: May 2021: transparently receive Ethernet over LLC/SNAP.
  */
 #include <linux/module.h>
 #include <linux/types.h>
@@ -157,6 +158,7 @@ __be16 eth_type_trans(struct sk_buff *skb, struct net_device *dev)
 	unsigned short _service_access_point;
 	const unsigned short *sap;
 	const struct ethhdr *eth;
+	const unsigned char *esn;
 
 	skb->dev = dev;
 	skb_reset_mac_header(skb);
@@ -185,8 +187,31 @@ __be16 eth_type_trans(struct sk_buff *skb, struct net_device *dev)
 	if (unlikely(netdev_uses_dsa(dev)))
 		return htons(ETH_P_XDSA);
 
+	/* The protocol field is > 0x0600 so this is an Ethernet frame */
 	if (likely(eth_proto_is_802_3(eth->h_proto)))
 		return eth->h_proto;
+
+	/* Check for Ethernet protocol packets encapsulated in LCC SNAP.
+	 * If found, de-encapsulate transparently and feed them upwards
+	 * as if they were received inside normal Ethernet frames.
+	 *
+	 *    6      6     2      1      1     1      5    0-1492 0-38    4
+	 * +------+-----+-----+------+------+-----+-------+------+-----+-----+
+	 * | Dest | Src | Len | DSAP | SSAP | CTL | Proto | Data | Pad | FCS |
+	 * |      |     |     |  xAA |  xAA | x03 |       |      |     |     |
+	 * +------+-----+-----+------+------+-----+-------+------+-----+-----+
+	 */
+	esn = skb->data;
+	if (esn[0] == 0xAA && esn[1] == 0xAA && esn[2] == 0x03 &&
+	    esn[3] == 0x00 && esn[4] == 0x00 && esn[5] == 0x00) {
+		/* pull LLC header (3 bytes) and protocol ID (5 bytes) */
+		/* then recalculate the FCS checksum. After the call, */
+		/* skb->data will be pointing to the IP protocol payload */
+		skb_pull_rcsum(skb, 8);
+		/* pretend that this is an Ethernet frame by returning */
+		/* the encapsulated prototol code (2 LSBytes of Proto) */
+		return *(__be16 *)(esn + 6);
+	}
 
 	/*
 	 *      This is a magic hack to spot IPX packets. Older Novell breaks
