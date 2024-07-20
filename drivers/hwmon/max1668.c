@@ -386,12 +386,10 @@ static int max1668_detect(struct i2c_client *client,
 	if (!type_name)
 		return -ENODEV;
 
-	strlcpy(info->type, type_name, I2C_NAME_SIZE);
+	strscpy(info->type, type_name, I2C_NAME_SIZE);
 
 	return 0;
 }
-
-static const struct i2c_device_id max1668_id[];
 
 static int max1668_probe(struct i2c_client *client)
 {
@@ -408,7 +406,7 @@ static int max1668_probe(struct i2c_client *client)
 		return -ENOMEM;
 
 	data->client = client;
-	data->type = i2c_match_id(max1668_id, client)->driver_data;
+	data->type = (uintptr_t)i2c_get_match_data(client);
 	mutex_init(&data->update_lock);
 
 	/* sysfs hooks */
@@ -435,7 +433,7 @@ static struct i2c_driver max1668_driver = {
 	.driver = {
 		  .name	= "max1668",
 		  },
-	.probe_new = max1668_probe,
+	.probe = max1668_probe,
 	.id_table = max1668_id,
 	.detect	= max1668_detect,
 	.address_list = max1668_addr_list,

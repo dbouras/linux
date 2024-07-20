@@ -15,7 +15,7 @@
 	.altmacro
 	.option norelax
 
-ENTRY(__kvm_riscv_switch_to)
+SYM_FUNC_START(__kvm_riscv_switch_to)
 	/* Save Host GPRs (except A0 and T0-T6) */
 	REG_S	ra, (KVM_ARCH_HOST_RA)(a0)
 	REG_S	sp, (KVM_ARCH_HOST_SP)(a0)
@@ -41,33 +41,37 @@ ENTRY(__kvm_riscv_switch_to)
 	REG_S	s10, (KVM_ARCH_HOST_S10)(a0)
 	REG_S	s11, (KVM_ARCH_HOST_S11)(a0)
 
-	/* Save Host and Restore Guest SSTATUS */
+	/* Load Guest CSR values */
 	REG_L	t0, (KVM_ARCH_GUEST_SSTATUS)(a0)
+	REG_L	t1, (KVM_ARCH_GUEST_HSTATUS)(a0)
+	REG_L	t2, (KVM_ARCH_GUEST_SCOUNTEREN)(a0)
+	la	t4, .Lkvm_switch_return
+	REG_L	t5, (KVM_ARCH_GUEST_SEPC)(a0)
+
+	/* Save Host and Restore Guest SSTATUS */
 	csrrw	t0, CSR_SSTATUS, t0
-	REG_S	t0, (KVM_ARCH_HOST_SSTATUS)(a0)
 
 	/* Save Host and Restore Guest HSTATUS */
-	REG_L	t1, (KVM_ARCH_GUEST_HSTATUS)(a0)
 	csrrw	t1, CSR_HSTATUS, t1
-	REG_S	t1, (KVM_ARCH_HOST_HSTATUS)(a0)
 
 	/* Save Host and Restore Guest SCOUNTEREN */
-	REG_L	t2, (KVM_ARCH_GUEST_SCOUNTEREN)(a0)
 	csrrw	t2, CSR_SCOUNTEREN, t2
-	REG_S	t2, (KVM_ARCH_HOST_SCOUNTEREN)(a0)
+
+	/* Save Host STVEC and change it to return path */
+	csrrw	t4, CSR_STVEC, t4
 
 	/* Save Host SSCRATCH and change it to struct kvm_vcpu_arch pointer */
 	csrrw	t3, CSR_SSCRATCH, a0
-	REG_S	t3, (KVM_ARCH_HOST_SSCRATCH)(a0)
-
-	/* Save Host STVEC and change it to return path */
-	la	t4, __kvm_switch_return
-	csrrw	t4, CSR_STVEC, t4
-	REG_S	t4, (KVM_ARCH_HOST_STVEC)(a0)
 
 	/* Restore Guest SEPC */
-	REG_L	t0, (KVM_ARCH_GUEST_SEPC)(a0)
-	csrw	CSR_SEPC, t0
+	csrw	CSR_SEPC, t5
+
+	/* Store Host CSR values */
+	REG_S	t0, (KVM_ARCH_HOST_SSTATUS)(a0)
+	REG_S	t1, (KVM_ARCH_HOST_HSTATUS)(a0)
+	REG_S	t2, (KVM_ARCH_HOST_SCOUNTEREN)(a0)
+	REG_S	t3, (KVM_ARCH_HOST_SSCRATCH)(a0)
+	REG_S	t4, (KVM_ARCH_HOST_STVEC)(a0)
 
 	/* Restore Guest GPRs (except A0) */
 	REG_L	ra, (KVM_ARCH_GUEST_RA)(a0)
@@ -109,7 +113,7 @@ ENTRY(__kvm_riscv_switch_to)
 
 	/* Back to Host */
 	.align 2
-__kvm_switch_return:
+.Lkvm_switch_return:
 	/* Swap Guest A0 with SSCRATCH */
 	csrrw	a0, CSR_SSCRATCH, a0
 
@@ -145,32 +149,36 @@ __kvm_switch_return:
 	REG_S	t5, (KVM_ARCH_GUEST_T5)(a0)
 	REG_S	t6, (KVM_ARCH_GUEST_T6)(a0)
 
+	/* Load Host CSR values */
+	REG_L	t1, (KVM_ARCH_HOST_STVEC)(a0)
+	REG_L	t2, (KVM_ARCH_HOST_SSCRATCH)(a0)
+	REG_L	t3, (KVM_ARCH_HOST_SCOUNTEREN)(a0)
+	REG_L	t4, (KVM_ARCH_HOST_HSTATUS)(a0)
+	REG_L	t5, (KVM_ARCH_HOST_SSTATUS)(a0)
+
 	/* Save Guest SEPC */
 	csrr	t0, CSR_SEPC
-	REG_S	t0, (KVM_ARCH_GUEST_SEPC)(a0)
-
-	/* Restore Host STVEC */
-	REG_L	t1, (KVM_ARCH_HOST_STVEC)(a0)
-	csrw	CSR_STVEC, t1
 
 	/* Save Guest A0 and Restore Host SSCRATCH */
-	REG_L	t2, (KVM_ARCH_HOST_SSCRATCH)(a0)
 	csrrw	t2, CSR_SSCRATCH, t2
-	REG_S	t2, (KVM_ARCH_GUEST_A0)(a0)
+
+	/* Restore Host STVEC */
+	csrw	CSR_STVEC, t1
 
 	/* Save Guest and Restore Host SCOUNTEREN */
-	REG_L	t3, (KVM_ARCH_HOST_SCOUNTEREN)(a0)
 	csrrw	t3, CSR_SCOUNTEREN, t3
-	REG_S	t3, (KVM_ARCH_GUEST_SCOUNTEREN)(a0)
 
 	/* Save Guest and Restore Host HSTATUS */
-	REG_L	t4, (KVM_ARCH_HOST_HSTATUS)(a0)
 	csrrw	t4, CSR_HSTATUS, t4
-	REG_S	t4, (KVM_ARCH_GUEST_HSTATUS)(a0)
 
 	/* Save Guest and Restore Host SSTATUS */
-	REG_L	t5, (KVM_ARCH_HOST_SSTATUS)(a0)
 	csrrw	t5, CSR_SSTATUS, t5
+
+	/* Store Guest CSR values */
+	REG_S	t0, (KVM_ARCH_GUEST_SEPC)(a0)
+	REG_S	t2, (KVM_ARCH_GUEST_A0)(a0)
+	REG_S	t3, (KVM_ARCH_GUEST_SCOUNTEREN)(a0)
+	REG_S	t4, (KVM_ARCH_GUEST_HSTATUS)(a0)
 	REG_S	t5, (KVM_ARCH_GUEST_SSTATUS)(a0)
 
 	/* Restore Host GPRs (except A0 and T0-T6) */
@@ -200,9 +208,9 @@ __kvm_switch_return:
 
 	/* Return to C code */
 	ret
-ENDPROC(__kvm_riscv_switch_to)
+SYM_FUNC_END(__kvm_riscv_switch_to)
 
-ENTRY(__kvm_riscv_unpriv_trap)
+SYM_CODE_START(__kvm_riscv_unpriv_trap)
 	/*
 	 * We assume that faulting unpriv load/store instruction is
 	 * 4-byte long and blindly increment SEPC by 4.
@@ -223,12 +231,10 @@ ENTRY(__kvm_riscv_unpriv_trap)
 	csrr	a1, CSR_HTINST
 	REG_S	a1, (KVM_ARCH_TRAP_HTINST)(a0)
 	sret
-ENDPROC(__kvm_riscv_unpriv_trap)
+SYM_CODE_END(__kvm_riscv_unpriv_trap)
 
 #ifdef	CONFIG_FPU
-	.align 3
-	.global __kvm_riscv_fp_f_save
-__kvm_riscv_fp_f_save:
+SYM_FUNC_START(__kvm_riscv_fp_f_save)
 	csrr t2, CSR_SSTATUS
 	li t1, SR_FS
 	csrs CSR_SSTATUS, t1
@@ -268,10 +274,9 @@ __kvm_riscv_fp_f_save:
 	sw t0, KVM_ARCH_FP_F_FCSR(a0)
 	csrw CSR_SSTATUS, t2
 	ret
+SYM_FUNC_END(__kvm_riscv_fp_f_save)
 
-	.align 3
-	.global __kvm_riscv_fp_d_save
-__kvm_riscv_fp_d_save:
+SYM_FUNC_START(__kvm_riscv_fp_d_save)
 	csrr t2, CSR_SSTATUS
 	li t1, SR_FS
 	csrs CSR_SSTATUS, t1
@@ -311,10 +316,9 @@ __kvm_riscv_fp_d_save:
 	sw t0, KVM_ARCH_FP_D_FCSR(a0)
 	csrw CSR_SSTATUS, t2
 	ret
+SYM_FUNC_END(__kvm_riscv_fp_d_save)
 
-	.align 3
-	.global __kvm_riscv_fp_f_restore
-__kvm_riscv_fp_f_restore:
+SYM_FUNC_START(__kvm_riscv_fp_f_restore)
 	csrr t2, CSR_SSTATUS
 	li t1, SR_FS
 	lw t0, KVM_ARCH_FP_F_FCSR(a0)
@@ -354,10 +358,9 @@ __kvm_riscv_fp_f_restore:
 	fscsr t0
 	csrw CSR_SSTATUS, t2
 	ret
+SYM_FUNC_END(__kvm_riscv_fp_f_restore)
 
-	.align 3
-	.global __kvm_riscv_fp_d_restore
-__kvm_riscv_fp_d_restore:
+SYM_FUNC_START(__kvm_riscv_fp_d_restore)
 	csrr t2, CSR_SSTATUS
 	li t1, SR_FS
 	lw t0, KVM_ARCH_FP_D_FCSR(a0)
@@ -397,4 +400,5 @@ __kvm_riscv_fp_d_restore:
 	fscsr t0
 	csrw CSR_SSTATUS, t2
 	ret
+SYM_FUNC_END(__kvm_riscv_fp_d_restore)
 #endif

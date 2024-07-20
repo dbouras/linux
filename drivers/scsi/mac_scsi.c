@@ -404,11 +404,12 @@ out:
 static int macscsi_dma_xfer_len(struct NCR5380_hostdata *hostdata,
                                 struct scsi_cmnd *cmd)
 {
-	if (hostdata->flags & FLAG_NO_PSEUDO_DMA ||
-	    cmd->SCp.this_residual < setup_use_pdma)
+	int resid = NCR5380_to_ncmd(cmd)->this_residual;
+
+	if (hostdata->flags & FLAG_NO_PSEUDO_DMA || resid < setup_use_pdma)
 		return 0;
 
-	return cmd->SCp.this_residual;
+	return resid;
 }
 
 static int macscsi_dma_residual(struct NCR5380_hostdata *hostdata)
@@ -434,7 +435,7 @@ static struct scsi_host_template mac_scsi_template = {
 	.sg_tablesize		= 1,
 	.cmd_per_lun		= 2,
 	.dma_boundary		= PAGE_SIZE - 1,
-	.cmd_size		= NCR5380_CMD_SIZE,
+	.cmd_size		= sizeof(struct NCR5380_cmd),
 	.max_sectors		= 128,
 };
 
@@ -522,7 +523,7 @@ fail_init:
 	return error;
 }
 
-static int __exit mac_scsi_remove(struct platform_device *pdev)
+static void __exit mac_scsi_remove(struct platform_device *pdev)
 {
 	struct Scsi_Host *instance = platform_get_drvdata(pdev);
 
@@ -531,11 +532,16 @@ static int __exit mac_scsi_remove(struct platform_device *pdev)
 		free_irq(instance->irq, instance);
 	NCR5380_exit(instance);
 	scsi_host_put(instance);
-	return 0;
 }
 
-static struct platform_driver mac_scsi_driver = {
-	.remove = __exit_p(mac_scsi_remove),
+/*
+ * mac_scsi_remove() lives in .exit.text. For drivers registered via
+ * module_platform_driver_probe() this is ok because they cannot get unbound at
+ * runtime. So mark the driver struct with __refdata to prevent modpost
+ * triggering a section mismatch warning.
+ */
+static struct platform_driver mac_scsi_driver __refdata = {
+	.remove_new = __exit_p(mac_scsi_remove),
 	.driver = {
 		.name	= DRV_MODULE_NAME,
 	},
@@ -544,4 +550,5 @@ static struct platform_driver mac_scsi_driver = {
 module_platform_driver_probe(mac_scsi_driver, mac_scsi_probe);
 
 MODULE_ALIAS("platform:" DRV_MODULE_NAME);
+MODULE_DESCRIPTION("Macintosh NCR5380 SCSI driver");
 MODULE_LICENSE("GPL");

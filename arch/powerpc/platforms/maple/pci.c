@@ -12,10 +12,10 @@
 #include <linux/string.h>
 #include <linux/init.h>
 #include <linux/irq.h>
+#include <linux/of_irq.h>
 
 #include <asm/sections.h>
 #include <asm/io.h>
-#include <asm/prom.h>
 #include <asm/pci-bridge.h>
 #include <asm/machdep.h>
 #include <asm/iommu.h>
@@ -595,7 +595,7 @@ void __init maple_pci_init(void)
 
 	/* Probe root PCI hosts, that is on U3 the AGP host and the
 	 * HyperTransport host. That one is actually "kept" around
-	 * and actually added last as it's resource management relies
+	 * and actually added last as its resource management relies
 	 * on the AGP resources to have been setup first
 	 */
 	root = of_find_node_by_path("/");

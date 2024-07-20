@@ -33,7 +33,9 @@ struct perf_session {
 	struct auxtrace		*auxtrace;
 	struct itrace_synth_opts *itrace_synth_opts;
 	struct list_head	auxtrace_index;
+#ifdef HAVE_LIBTRACEEVENT
 	struct trace_event	tevent;
+#endif
 	struct perf_record_time_conv	time_conv;
 	bool			repipe;
 	bool			one_mmap;
@@ -52,6 +54,7 @@ struct perf_session {
 struct decomp {
 	struct decomp *next;
 	u64 file_pos;
+	const char *file_path;
 	size_t mmap_len;
 	u64 head;
 	size_t size;
@@ -87,7 +90,7 @@ int perf_session__peek_events(struct perf_session *session, u64 offset,
 int perf_session__process_events(struct perf_session *session);
 
 int perf_session__queue_event(struct perf_session *s, union perf_event *event,
-			      u64 timestamp, u64 file_offset);
+			      u64 timestamp, u64 file_offset, const char *file_path);
 
 void perf_tool__fill_defaults(struct perf_tool *tool);
 
@@ -127,8 +130,9 @@ size_t perf_session__fprintf_dsos(struct perf_session *session, FILE *fp);
 size_t perf_session__fprintf_dsos_buildid(struct perf_session *session, FILE *fp,
 					  bool (fn)(struct dso *dso, int parm), int parm);
 
-size_t perf_session__fprintf_nr_events(struct perf_session *session, FILE *fp,
-				       bool skip_empty);
+size_t perf_session__fprintf_nr_events(struct perf_session *session, FILE *fp);
+
+void perf_session__dump_kmaps(struct perf_session *session);
 
 struct evsel *perf_session__find_first_evtype(struct perf_session *session,
 					    unsigned int type);
@@ -151,7 +155,13 @@ int perf_session__deliver_synth_event(struct perf_session *session,
 				      union perf_event *event,
 				      struct perf_sample *sample);
 
+int perf_session__dsos_hit_all(struct perf_session *session);
+
 int perf_event__process_id_index(struct perf_session *session,
 				 union perf_event *event);
+
+int perf_event__process_finished_round(struct perf_tool *tool,
+				       union perf_event *event,
+				       struct ordered_events *oe);
 
 #endif /* __PERF_SESSION_H */

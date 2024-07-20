@@ -2555,7 +2555,6 @@ static void snd_intel8x0_free(struct snd_card *card)
 		free_irq(chip->irq, chip);
 }
 
-#ifdef CONFIG_PM_SLEEP
 /*
  * power management
  */
@@ -2628,11 +2627,7 @@ static int intel8x0_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(intel8x0_pm, intel8x0_suspend, intel8x0_resume);
-#define INTEL8X0_PM_OPS	&intel8x0_pm
-#else
-#define INTEL8X0_PM_OPS	NULL
-#endif /* CONFIG_PM_SLEEP */
+static DEFINE_SIMPLE_DEV_PM_OPS(intel8x0_pm, intel8x0_suspend, intel8x0_resume);
 
 #define INTEL8X0_TESTBUF_SIZE	32768	/* enough large for one shot */
 
@@ -3109,8 +3104,8 @@ static int check_default_spdif_aclink(struct pci_dev *pci)
 	return 0;
 }
 
-static int snd_intel8x0_probe(struct pci_dev *pci,
-			      const struct pci_device_id *pci_id)
+static int __snd_intel8x0_probe(struct pci_dev *pci,
+				const struct pci_device_id *pci_id)
 {
 	struct snd_card *card;
 	struct intel8x0 *chip;
@@ -3189,12 +3184,18 @@ static int snd_intel8x0_probe(struct pci_dev *pci,
 	return 0;
 }
 
+static int snd_intel8x0_probe(struct pci_dev *pci,
+			      const struct pci_device_id *pci_id)
+{
+	return snd_card_free_on_error(&pci->dev, __snd_intel8x0_probe(pci, pci_id));
+}
+
 static struct pci_driver intel8x0_driver = {
 	.name = KBUILD_MODNAME,
 	.id_table = snd_intel8x0_ids,
 	.probe = snd_intel8x0_probe,
 	.driver = {
-		.pm = INTEL8X0_PM_OPS,
+		.pm = &intel8x0_pm,
 	},
 };
 

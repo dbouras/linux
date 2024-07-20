@@ -233,8 +233,7 @@ static const struct iio_info adjd_s311_info = {
 	.write_raw = adjd_s311_write_raw,
 };
 
-static int adjd_s311_probe(struct i2c_client *client,
-			   const struct i2c_device_id *id)
+static int adjd_s311_probe(struct i2c_client *client)
 {
 	struct adjd_s311_data *data;
 	struct iio_dev *indio_dev;
@@ -262,7 +261,7 @@ static int adjd_s311_probe(struct i2c_client *client,
 }
 
 static const struct i2c_device_id adjd_s311_id[] = {
-	{ "adjd_s311", 0 },
+	{ "adjd_s311" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, adjd_s311_id);

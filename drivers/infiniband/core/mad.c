@@ -59,9 +59,6 @@ static void create_mad_addr_info(struct ib_mad_send_wr_private *mad_send_wr,
 			  struct ib_mad_qp_info *qp_info,
 			  struct trace_event_raw_ib_mad_send_template *entry)
 {
-	u16 pkey;
-	struct ib_device *dev = qp_info->port_priv->device;
-	u32 pnum = qp_info->port_priv->port_num;
 	struct ib_ud_wr *wr = &mad_send_wr->send_wr;
 	struct rdma_ah_attr attr = {};
 
@@ -69,8 +66,6 @@ static void create_mad_addr_info(struct ib_mad_send_wr_private *mad_send_wr,
 
 	/* These are common */
 	entry->sl = attr.sl;
-	ib_query_pkey(dev, pnum, wr->pkey_index, &pkey);
-	entry->pkey = pkey;
 	entry->rqpn = wr->remote_qpn;
 	entry->rqkey = wr->remote_qkey;
 	entry->dlid = rdma_ah_get_dlid(&attr);
@@ -2988,9 +2983,12 @@ static int ib_mad_port_open(struct ib_device *device,
 		if (ret)
 			goto error6;
 	}
-	ret = create_mad_qp(&port_priv->qp_info[1], IB_QPT_GSI);
-	if (ret)
-		goto error7;
+
+	if (rdma_cap_ib_cm(device, port_num)) {
+		ret = create_mad_qp(&port_priv->qp_info[1], IB_QPT_GSI);
+		if (ret)
+			goto error7;
+	}
 
 	snprintf(name, sizeof(name), "ib_mad%u", port_num);
 	port_priv->wq = alloc_ordered_workqueue(name, WQ_MEM_RECLAIM);

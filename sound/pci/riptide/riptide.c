@@ -448,9 +448,7 @@ struct snd_riptide {
 
 	unsigned long received_irqs;
 	unsigned long handled_irqs;
-#ifdef CONFIG_PM_SLEEP
 	int in_suspend;
-#endif
 };
 
 struct sgd {			/* scatter gather desriptor */
@@ -1142,7 +1140,6 @@ static irqreturn_t riptide_handleirq(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int riptide_suspend(struct device *dev)
 {
 	struct snd_card *card = dev_get_drvdata(dev);
@@ -1166,11 +1163,7 @@ static int riptide_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(riptide_pm, riptide_suspend, riptide_resume);
-#define RIPTIDE_PM_OPS	&riptide_pm
-#else
-#define RIPTIDE_PM_OPS	NULL
-#endif /* CONFIG_PM_SLEEP */
+static DEFINE_SIMPLE_DEV_PM_OPS(riptide_pm, riptide_suspend, riptide_resume);
 
 static int try_to_load_firmware(struct cmdif *cif, struct snd_riptide *chip)
 {
@@ -2023,7 +2016,7 @@ static void snd_riptide_joystick_remove(struct pci_dev *pci)
 #endif
 
 static int
-snd_card_riptide_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
+__snd_card_riptide_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 {
 	static int dev;
 	struct snd_card *card;
@@ -2105,15 +2098,15 @@ snd_card_riptide_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 	strcpy(card->driver, "RIPTIDE");
 	strcpy(card->shortname, "Riptide");
 #ifdef SUPPORT_JOYSTICK
-	snprintf(card->longname, sizeof(card->longname),
-		 "%s at 0x%lx, irq %i mpu 0x%x opl3 0x%x gameport 0x%x",
-		 card->shortname, chip->port, chip->irq, chip->mpuaddr,
-		 chip->opladdr, chip->gameaddr);
+	scnprintf(card->longname, sizeof(card->longname),
+		  "%s at 0x%lx, irq %i mpu 0x%x opl3 0x%x gameport 0x%x",
+		  card->shortname, chip->port, chip->irq, chip->mpuaddr,
+		  chip->opladdr, chip->gameaddr);
 #else
-	snprintf(card->longname, sizeof(card->longname),
-		 "%s at 0x%lx, irq %i mpu 0x%x opl3 0x%x",
-		 card->shortname, chip->port, chip->irq, chip->mpuaddr,
-		 chip->opladdr);
+	scnprintf(card->longname, sizeof(card->longname),
+		  "%s at 0x%lx, irq %i mpu 0x%x opl3 0x%x",
+		  card->shortname, chip->port, chip->irq, chip->mpuaddr,
+		  chip->opladdr);
 #endif
 	snd_riptide_proc_init(chip);
 	err = snd_card_register(card);
@@ -2124,12 +2117,18 @@ snd_card_riptide_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 	return 0;
 }
 
+static int
+snd_card_riptide_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
+{
+	return snd_card_free_on_error(&pci->dev, __snd_card_riptide_probe(pci, pci_id));
+}
+
 static struct pci_driver driver = {
 	.name = KBUILD_MODNAME,
 	.id_table = snd_riptide_ids,
 	.probe = snd_card_riptide_probe,
 	.driver = {
-		.pm = RIPTIDE_PM_OPS,
+		.pm = &riptide_pm,
 	},
 };
 

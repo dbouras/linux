@@ -22,6 +22,8 @@
 #include "counter-chrdev.h"
 #include "counter-sysfs.h"
 
+#define COUNTER_NAME	"counter"
+
 /* Provides a unique ID for each counter device */
 static DEFINE_IDA(counter_ida);
 
@@ -29,10 +31,11 @@ struct counter_device_allochelper {
 	struct counter_device counter;
 
 	/*
-	 * This is cache line aligned to ensure private data behaves like if it
-	 * were kmalloced separately.
+	 * This ensures private data behaves like if it were kmalloced
+	 * separately. Also ensures the minimum alignment for safe DMA
+	 * operations (which may or may not mean cache alignment).
 	 */
-	unsigned long privdata[] ____cacheline_aligned;
+	unsigned long privdata[] __aligned(ARCH_DMA_MINALIGN);
 };
 
 static void counter_device_release(struct device *dev)
@@ -46,12 +49,12 @@ static void counter_device_release(struct device *dev)
 	kfree(container_of(counter, struct counter_device_allochelper, counter));
 }
 
-static struct device_type counter_device_type = {
+static const struct device_type counter_device_type = {
 	.name = "counter_device",
 	.release = counter_device_release,
 };
 
-static struct bus_type counter_bus_type = {
+static const struct bus_type counter_bus_type = {
 	.name = "counter",
 	.dev_name = "counter",
 };
@@ -71,7 +74,7 @@ void *counter_priv(const struct counter_device *const counter)
 
 	return &ch->privdata;
 }
-EXPORT_SYMBOL_GPL(counter_priv);
+EXPORT_SYMBOL_NS_GPL(counter_priv, COUNTER);
 
 /**
  * counter_alloc - allocate a counter_device
@@ -113,8 +116,15 @@ struct counter_device *counter_alloc(size_t sizeof_priv)
 
 	device_initialize(dev);
 
+	err = dev_set_name(dev, COUNTER_NAME "%d", dev->id);
+	if (err)
+		goto err_dev_set_name;
+
 	return counter;
 
+err_dev_set_name:
+
+	counter_chrdev_remove(counter);
 err_chrdev_add:
 
 	ida_free(&counter_ida, dev->id);
@@ -124,13 +134,13 @@ err_ida_alloc:
 
 	return NULL;
 }
-EXPORT_SYMBOL_GPL(counter_alloc);
+EXPORT_SYMBOL_NS_GPL(counter_alloc, COUNTER);
 
 void counter_put(struct counter_device *counter)
 {
 	put_device(&counter->dev);
 }
-EXPORT_SYMBOL_GPL(counter_put);
+EXPORT_SYMBOL_NS_GPL(counter_put, COUNTER);
 
 /**
  * counter_add - complete registration of a counter
@@ -157,7 +167,7 @@ int counter_add(struct counter_device *counter)
 	/* implies device_add(dev) */
 	return cdev_device_add(&counter->chrdev, dev);
 }
-EXPORT_SYMBOL_GPL(counter_add);
+EXPORT_SYMBOL_NS_GPL(counter_add, COUNTER);
 
 /**
  * counter_unregister - unregister Counter from the system
@@ -179,7 +189,7 @@ void counter_unregister(struct counter_device *const counter)
 
 	mutex_unlock(&counter->ops_exist_lock);
 }
-EXPORT_SYMBOL_GPL(counter_unregister);
+EXPORT_SYMBOL_NS_GPL(counter_unregister, COUNTER);
 
 static void devm_counter_release(void *counter)
 {
@@ -214,7 +224,7 @@ struct counter_device *devm_counter_alloc(struct device *dev, size_t sizeof_priv
 
 	return counter;
 }
-EXPORT_SYMBOL_GPL(devm_counter_alloc);
+EXPORT_SYMBOL_NS_GPL(devm_counter_alloc, COUNTER);
 
 /**
  * devm_counter_add - complete registration of a counter
@@ -235,7 +245,7 @@ int devm_counter_add(struct device *dev,
 
 	return devm_add_action_or_reset(dev, devm_counter_release, counter);
 }
-EXPORT_SYMBOL_GPL(devm_counter_add);
+EXPORT_SYMBOL_NS_GPL(devm_counter_add, COUNTER);
 
 #define COUNTER_DEV_MAX 256
 
@@ -247,7 +257,8 @@ static int __init counter_init(void)
 	if (err < 0)
 		return err;
 
-	err = alloc_chrdev_region(&counter_devt, 0, COUNTER_DEV_MAX, "counter");
+	err = alloc_chrdev_region(&counter_devt, 0, COUNTER_DEV_MAX,
+				  COUNTER_NAME);
 	if (err < 0)
 		goto err_unregister_bus;
 

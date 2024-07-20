@@ -123,17 +123,14 @@ static void l2tp_dfs_seq_tunnel_show(struct seq_file *m, void *v)
 	struct l2tp_tunnel *tunnel = v;
 	struct l2tp_session *session;
 	int session_count = 0;
-	int hash;
 
 	rcu_read_lock_bh();
-	for (hash = 0; hash < L2TP_HASH_SIZE; hash++) {
-		hlist_for_each_entry_rcu(session, &tunnel->session_hlist[hash], hlist) {
-			/* Session ID of zero is a dummy/reserved value used by pppol2tp */
-			if (session->session_id == 0)
-				continue;
+	list_for_each_entry_rcu(session, &tunnel->session_list, list) {
+		/* Session ID of zero is a dummy/reserved value used by pppol2tp */
+		if (session->session_id == 0)
+			continue;
 
-			session_count++;
-		}
+		session_count++;
 	}
 	rcu_read_unlock_bh();
 
@@ -184,7 +181,7 @@ static void l2tp_dfs_seq_session_show(struct seq_file *m, void *v)
 		   session->pwtype == L2TP_PWTYPE_PPP ? "PPP" :
 		   "");
 	if (session->send_seq || session->recv_seq)
-		seq_printf(m, "   nr %hu, ns %hu\n", session->nr, session->ns);
+		seq_printf(m, "   nr %u, ns %u\n", session->nr, session->ns);
 	seq_printf(m, "   refcnt %d\n", refcount_read(&session->ref_count));
 	seq_printf(m, "   config 0/0/%c/%c/-/%s %08x %u\n",
 		   session->recv_seq ? 'R' : '-',
@@ -192,7 +189,7 @@ static void l2tp_dfs_seq_session_show(struct seq_file *m, void *v)
 		   session->lns_mode ? "LNS" : "LAC",
 		   0,
 		   jiffies_to_msecs(session->reorder_timeout));
-	seq_printf(m, "   offset 0 l2specific %hu/%hu\n",
+	seq_printf(m, "   offset 0 l2specific %hu/%d\n",
 		   session->l2specific_type, l2tp_get_l2specific_len(session));
 	if (session->cookie_len) {
 		seq_printf(m, "   cookie %02x%02x%02x%02x",
@@ -215,7 +212,7 @@ static void l2tp_dfs_seq_session_show(struct seq_file *m, void *v)
 		seq_puts(m, "\n");
 	}
 
-	seq_printf(m, "   %hu/%hu tx %ld/%ld/%ld rx %ld/%ld/%ld\n",
+	seq_printf(m, "   %u/%u tx %ld/%ld/%ld rx %ld/%ld/%ld\n",
 		   session->nr, session->ns,
 		   atomic_long_read(&session->stats.tx_packets),
 		   atomic_long_read(&session->stats.tx_bytes),

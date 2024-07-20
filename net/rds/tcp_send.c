@@ -72,9 +72,10 @@ int rds_tcp_xmit(struct rds_connection *conn, struct rds_message *rm,
 {
 	struct rds_conn_path *cp = rm->m_inc.i_conn_path;
 	struct rds_tcp_connection *tc = cp->cp_transport_data;
+	struct msghdr msg = {};
+	struct bio_vec bvec;
 	int done = 0;
 	int ret = 0;
-	int more;
 
 	if (hdr_off == 0) {
 		/*
@@ -111,15 +112,17 @@ int rds_tcp_xmit(struct rds_connection *conn, struct rds_message *rm,
 			goto out;
 	}
 
-	more = rm->data.op_nents > 1 ? (MSG_MORE | MSG_SENDPAGE_NOTLAST) : 0;
 	while (sg < rm->data.op_nents) {
-		int flags = MSG_DONTWAIT | MSG_NOSIGNAL | more;
+		msg.msg_flags = MSG_SPLICE_PAGES | MSG_DONTWAIT | MSG_NOSIGNAL;
+		if (sg + 1 < rm->data.op_nents)
+			msg.msg_flags |= MSG_MORE;
 
-		ret = tc->t_sock->ops->sendpage(tc->t_sock,
-						sg_page(&rm->data.op_sg[sg]),
-						rm->data.op_sg[sg].offset + off,
-						rm->data.op_sg[sg].length - off,
-						flags);
+		bvec_set_page(&bvec, sg_page(&rm->data.op_sg[sg]),
+			      rm->data.op_sg[sg].length - off,
+			      rm->data.op_sg[sg].offset + off);
+		iov_iter_bvec(&msg.msg_iter, ITER_SOURCE, &bvec, 1,
+			      rm->data.op_sg[sg].length - off);
+		ret = sock_sendmsg(tc->t_sock, &msg);
 		rdsdebug("tcp sendpage %p:%u:%u ret %d\n", (void *)sg_page(&rm->data.op_sg[sg]),
 			 rm->data.op_sg[sg].offset + off, rm->data.op_sg[sg].length - off,
 			 ret);
@@ -132,105 +135,92 @@ int rds_tcp_xmit(struct rds_connection *conn, struct rds_message *rm,
 			off = 0;
 			sg++;
 		}
-		if (sg == rm->data.op_nents - 1)
-			more = 0;
 	}
 
 out:
 	if (ret <= 0) {
-		/* write_space will hit after EAGAIN, all else fatal);
+		/* write_space will hit after EAGAIN, all else fatal */
+		if (ret == -EAGAIN) {
+			rds_tcp_stats_inc(s_tcp_sndbuf_full);
+			ret = 0;
+		} else {
+			/* No need to disconnect/reconnect if path_drop
+			 * has already been triggered, because, e.g., of
+			 * an incoming RST.
+			 */
+			if (rds_conn_path_up(cp)) {
+				pr_warn("RDS/tcp: send to %pI6c on cp [%d]"
+					"returned %d, "
+					"disconnecting and reconnecting\n",
+					&conn->c_faddr, cp->cp_index, ret);
+				rds_conn_path_drop(cp, false);
+			}
+		}
+	}
+	if (done == 0)
+		done = ret;
+	return done;
 }
 
-/* the core send_semconn_path;
-	gfp_t gfp;
-};
-
-static int rds_tcp_data_recv(read_descriptor_t *desc, struct sk_buff *skb,
-			     unsigned int offset, size_t len)
+/*
+ * rm->m_ack_seq is set to the tcp sequence number that corresponds to the
+ * last byte of the message, including the header.  This means that the
+ * entire message has been received if rm->m_ack_seq is "before" the next
+ * unacked byte of the TCP sequence space.  We have to do very careful
+ * wrapping 32bit comparisons here.
+ */
+static int rds_tcp_is_acked(struct rds_message *rm, uint64_t ack)
 {
-	struct rds_tcp_desc_arg *arg = desc->arg.data;
-	struct rds_conn_path *cp = arg->conn_path;
-	struct rds_tcp_connection *tc = cp->cp_transport_data;
-	struct rds_tcp_incoming *tinc = tc->t_tinc;
-	struct sk_buff *clone;
-	size_t left = len, to_copy;
+	if (!test_bit(RDS_MSG_HAS_ACK_SEQ, &rm->m_flags))
+		return 0;
+	return (__s32)((u32)rm->m_ack_seq - (u32)ack) < 0;
+}
 
-	rdsdebug("tcp data tc %p skb %p offset %u len %zu\n", tc, skb, offset,
-		 len);
+void rds_tcp_write_space(struct sock *sk)
+{
+	void (*write_space)(struct sock *sk);
+	struct rds_conn_path *cp;
+	struct rds_tcp_connection *tc;
+
+	read_lock_bh(&sk->sk_callback_lock);
+	cp = sk->sk_user_data;
+	if (!cp) {
+		write_space = sk->sk_write_space;
+		goto out;
+	}
+
+	tc = cp->cp_transport_data;
+	rdsdebug("write_space for tc %p\n", tc);
+	write_space = tc->t_orig_write_space;
+	rds_tcp_stats_inc(s_tcp_write_space_calls);
+
+	rdsdebug("tcp una %u\n", rds_tcp_snd_una(tc));
+	tc->t_last_seen_una = rds_tcp_snd_una(tc);
+	rds_send_path_drop_acked(cp, rds_tcp_snd_una(tc), rds_tcp_is_acked);
+
+	rcu_read_lock();
+	if ((refcount_read(&sk->sk_wmem_alloc) << 1) <= sk->sk_sndbuf &&
+	    !rds_destroy_pending(cp->cp_conn))
+		queue_delayed_work(rds_wq, &cp->cp_send_w, 0);
+	rcu_read_unlock();
+
+out:
+	read_unlock_bh(&sk->sk_callback_lock);
 
 	/*
-	 * tcp_read_sock() interprets partial progress as an indication to stop
-	 * processing.
+	 * write_space is only called when data leaves tcp's send queue if
+	 * SOCK_NOSPACE is set.  We set SOCK_NOSPACE every time we put
+	 * data in tcp's send queue because we use write_space to parse the
+	 * sequence numbers and notice that rds messages have been fully
+	 * received.
+	 *
+	 * tcp's write_space clears SOCK_NOSPACE if the send queue has more
+	 * than a certain amount of space. So we need to set it again *after*
+	 * we call tcp's write_space or else we might only get called on the
+	 * first of a series of incoming tcp acks.
 	 */
-	while (left) {
-		if (!tinc) {
-			tinc = kmem_cache_alloc(rds_tcp_incoming_slab,
-						arg->gfp);
-			if (!tinc) {
-				desc->error = -ENOMEM;
-				goto out;
-			}
-			tc->t_tinc = tinc;
-			rdsdebug("allocated tinc %p\n", tinc);
-			rds_inc_path_init(&tinc->ti_inc, cp,
-					  &cp->cp_conn->c_faddr);
-			tinc->ti_inc.i_rx_lat_trace[RDS_MSG_RX_HDR] =
-					local_clock();
+	write_space(sk);
 
-			/*
-			 * XXX * we might be able to use the __ variants when
-			 * we've already serialized at a higher level.
-			 */
-			skb_queue_head_init(&tinc->ti_skb_list);
-		}
-
-		if (left && tc->t_tinc_hdr_rem) {
-			to_copy = min(tc->t_tinc_hdr_rem, left);
-			rdsdebug("copying %zu header from skb %p\n", to_copy,
-				 skb);
-			skb_copy_bits(skb, offset,
-				      (char *)&tinc->ti_inc.i_hdr +
-						sizeof(struct rds_header) -
-						tc->t_tinc_hdr_rem,
-				      to_copy);
-			tc->t_tinc_hdr_rem -= to_copy;
-			left -= to_copy;
-			offset += to_copy;
-
-			if (tc->t_tinc_hdr_rem == 0) {
-				/* could be 0 for a 0 len message */
-				tc->t_tinc_data_rem =
-					be32_to_cpu(tinc->ti_inc.i_hdr.h_len);
-				tinc->ti_inc.i_rx_lat_trace[RDS_MSG_RX_START] =
-					local_clock();
-			}
-		}
-
-		if (left && tc->t_tinc_data_rem) {
-			to_copy = min(tc->t_tinc_data_rem, left);
-
-			clone = pskb_extract(skb, offset, to_copy, arg->gfp);
-			if (!clone) {
-				desc->error = -ENOMEM;
-				goto out;
-			}
-
-			skb_queue_tail(&tinc->ti_skb_list, clone);
-
-			rdsdebug("skb %p data %p len %d off %u to_copy %zu -> "
-				 "clone %p data %p len %d\n",
-				 skb, skb->data, skb->len, offset, to_copy,
-				 clone, clone->data, clone->len);
-
-			tc->t_tinc_data_rem -= to_copy;
-			left -= to_copy;
-			offset += to_copy;
-		}
-
-		if (tc->t_tinc_hdr_rem == 0 && tc->t_tinc_data_rem == 0) {
-			struct rds_connection *conn = cp->cp_conn;
-
-			if (tinc->ti_inc.i_hdr.h_flags == RDS_FLAG_CONG_BITMAP)
-				rds_tcp_cong_recv(conn, tinc);
-			else
-				rds_recv_incoming(conn, &c
+	if (sk->sk_socket)
+		set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
+}

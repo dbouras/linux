@@ -9,6 +9,8 @@
 #include <linux/module.h>
 #include <linux/firmware.h>
 #include <linux/regmap.h>
+#include <linux/acpi.h>
+#include <acpi/acpi_bus.h>
 #include <asm/unaligned.h>
 
 #include <net/bluetooth/bluetooth.h>
@@ -24,13 +26,28 @@
 #define ECDSA_OFFSET		644
 #define ECDSA_HEADER_LEN	320
 
+enum {
+	DSM_SET_WDISABLE2_DELAY = 1,
+	DSM_SET_RESET_METHOD = 3,
+};
+
 #define CMD_WRITE_BOOT_PARAMS	0xfc0e
 struct cmd_write_boot_params {
-	u32 boot_addr;
+	__le32 boot_addr;
 	u8  fw_build_num;
 	u8  fw_build_ww;
 	u8  fw_build_yy;
 } __packed;
+
+static struct {
+	const char *driver_name;
+	u8         hw_variant;
+	u32        fw_build_num;
+} coredump_info;
+
+static const guid_t btintel_guid_dsm =
+	GUID_INIT(0xaa10f4e0, 0x81ac, 0x4233,
+		  0xab, 0xf6, 0x3b, 0x2a, 0xc5, 0x0e, 0x28, 0xd9);
 
 int btintel_check_bdaddr(struct hci_dev *hdev)
 {
@@ -218,7 +235,7 @@ static int btintel_set_diag_combined(struct hci_dev *hdev, bool enable)
 	return ret;
 }
 
-static void btintel_hw_error(struct hci_dev *hdev, u8 code)
+void btintel_hw_error(struct hci_dev *hdev, u8 code)
 {
 	struct sk_buff *skb;
 	u8 type = 0x00;
@@ -250,6 +267,7 @@ static void btintel_hw_error(struct hci_dev *hdev, u8 code)
 
 	kfree_skb(skb);
 }
+EXPORT_SYMBOL_GPL(btintel_hw_error);
 
 int btintel_version_info(struct hci_dev *hdev, struct intel_version *ver)
 {
@@ -303,6 +321,9 @@ int btintel_version_info(struct hci_dev *hdev, struct intel_version *ver)
 		bt_dev_err(hdev, "Unsupported firmware variant(%02x)", ver->fw_variant);
 		return -EINVAL;
 	}
+
+	coredump_info.hw_variant = ver->hw_variant;
+	coredump_info.fw_build_num = ver->fw_build_num;
 
 	bt_dev_info(hdev, "%s revision %u.%u build %u week %u %u",
 		    variant, ver->fw_revision >> 4, ver->fw_revision & 0x0f,
@@ -411,7 +432,7 @@ int btintel_read_version(struct hci_dev *hdev, struct intel_version *ver)
 		return PTR_ERR(skb);
 	}
 
-	if (skb->len != sizeof(*ver)) {
+	if (!skb || skb->len != sizeof(*ver)) {
 		bt_dev_err(hdev, "Intel version event size mismatch");
 		kfree_skb(skb);
 		return -EILSEQ;
@@ -425,8 +446,8 @@ int btintel_read_version(struct hci_dev *hdev, struct intel_version *ver)
 }
 EXPORT_SYMBOL_GPL(btintel_read_version);
 
-static int btintel_version_info_tlv(struct hci_dev *hdev,
-				    struct intel_version_tlv *version)
+int btintel_version_info_tlv(struct hci_dev *hdev,
+			     struct intel_version_tlv *version)
 {
 	const char *variant;
 
@@ -449,6 +470,10 @@ static int btintel_version_info_tlv(struct hci_dev *hdev,
 	case 0x17:	/* TyP */
 	case 0x18:	/* Slr */
 	case 0x19:	/* Slr-F */
+	case 0x1b:      /* Mgr */
+	case 0x1c:	/* Gale Peak (GaP) */
+	case 0x1d:	/* BlazarU (BzrU) */
+	case 0x1e:	/* BlazarI (Bzr) */
 		break;
 	default:
 		bt_dev_err(hdev, "Unsupported Intel hardware variant (0x%x)",
@@ -457,7 +482,7 @@ static int btintel_version_info_tlv(struct hci_dev *hdev,
 	}
 
 	switch (version->img_type) {
-	case 0x01:
+	case BTINTEL_IMG_BOOTLOADER:
 		variant = "Bootloader";
 		/* It is required that every single firmware fragment is acknowledged
 		 * with a command complete event. If the boot parameters indicate
@@ -489,7 +514,10 @@ static int btintel_version_info_tlv(struct hci_dev *hdev,
 			    version->min_fw_build_nn, version->min_fw_build_cw,
 			    2000 + version->min_fw_build_yy);
 		break;
-	case 0x03:
+	case BTINTEL_IMG_IML:
+		variant = "Intermediate loader";
+		break;
+	case BTINTEL_IMG_OP:
 		variant = "Firmware";
 		break;
 	default:
@@ -497,16 +525,22 @@ static int btintel_version_info_tlv(struct hci_dev *hdev,
 		return -EINVAL;
 	}
 
+	coredump_info.hw_variant = INTEL_HW_VARIANT(version->cnvi_bt);
+	coredump_info.fw_build_num = version->build_num;
+
 	bt_dev_info(hdev, "%s timestamp %u.%u buildtype %u build %u", variant,
 		    2000 + (version->timestamp >> 8), version->timestamp & 0xff,
 		    version->build_type, version->build_num);
+	if (version->img_type == BTINTEL_IMG_OP)
+		bt_dev_info(hdev, "Firmware SHA1: 0x%8.8x", version->git_sha1);
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(btintel_version_info_tlv);
 
-static int btintel_parse_version_tlv(struct hci_dev *hdev,
-				     struct intel_version_tlv *version,
-				     struct sk_buff *skb)
+int btintel_parse_version_tlv(struct hci_dev *hdev,
+			      struct intel_version_tlv *version,
+			      struct sk_buff *skb)
 {
 	/* Consume Command Complete Status field */
 	skb_pull(skb, 1);
@@ -595,6 +629,13 @@ static int btintel_parse_version_tlv(struct hci_dev *hdev,
 			memcpy(&version->otp_bd_addr, tlv->val,
 							sizeof(bdaddr_t));
 			break;
+		case INTEL_TLV_GIT_SHA1:
+			version->git_sha1 = get_unaligned_le32(tlv->val);
+			break;
+		case INTEL_TLV_FW_ID:
+			snprintf(version->fw_id, sizeof(version->fw_id),
+				 "%s", tlv->val);
+			break;
 		default:
 			/* Ignore rest of information */
 			break;
@@ -605,6 +646,7 @@ static int btintel_parse_version_tlv(struct hci_dev *hdev,
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(btintel_parse_version_tlv);
 
 static int btintel_read_version_tlv(struct hci_dev *hdev,
 				    struct intel_version_tlv *version)
@@ -794,7 +836,7 @@ static void regmap_ibt_free_context(void *context)
 	kfree(context);
 }
 
-static struct regmap_bus regmap_ibt = {
+static const struct regmap_bus regmap_ibt = {
 	.read = regmap_ibt_read,
 	.write = regmap_ibt_write,
 	.gather_write = regmap_ibt_gather_write,
@@ -1132,7 +1174,7 @@ static int btintel_download_fw_tlv(struct hci_dev *hdev,
 	 * If the firmware version has changed that means it needs to be reset
 	 * to bootloader when operational so the new firmware can be loaded.
 	 */
-	if (ver->img_type == 0x03)
+	if (ver->img_type == BTINTEL_IMG_OP)
 		return -EINVAL;
 
 	/* iBT hardware variants 0x0b, 0x0c, 0x11, 0x12, 0x13, 0x14 support
@@ -1390,6 +1432,59 @@ int btintel_set_quality_report(struct hci_dev *hdev, bool enable)
 	return err;
 }
 EXPORT_SYMBOL_GPL(btintel_set_quality_report);
+
+static void btintel_coredump(struct hci_dev *hdev)
+{
+	struct sk_buff *skb;
+
+	skb = __hci_cmd_sync(hdev, 0xfc4e, 0, NULL, HCI_CMD_TIMEOUT);
+	if (IS_ERR(skb)) {
+		bt_dev_err(hdev, "Coredump failed (%ld)", PTR_ERR(skb));
+		return;
+	}
+
+	kfree_skb(skb);
+}
+
+static void btintel_dmp_hdr(struct hci_dev *hdev, struct sk_buff *skb)
+{
+	char buf[80];
+
+	snprintf(buf, sizeof(buf), "Controller Name: 0x%X\n",
+		 coredump_info.hw_variant);
+	skb_put_data(skb, buf, strlen(buf));
+
+	snprintf(buf, sizeof(buf), "Firmware Version: 0x%X\n",
+		 coredump_info.fw_build_num);
+	skb_put_data(skb, buf, strlen(buf));
+
+	snprintf(buf, sizeof(buf), "Driver: %s\n", coredump_info.driver_name);
+	skb_put_data(skb, buf, strlen(buf));
+
+	snprintf(buf, sizeof(buf), "Vendor: Intel\n");
+	skb_put_data(skb, buf, strlen(buf));
+}
+
+static int btintel_register_devcoredump_support(struct hci_dev *hdev)
+{
+	struct intel_debug_features features;
+	int err;
+
+	err = btintel_read_debug_features(hdev, &features);
+	if (err) {
+		bt_dev_info(hdev, "Error reading debug features");
+		return err;
+	}
+
+	if (!(features.page1[0] & 0x3f)) {
+		bt_dev_dbg(hdev, "Telemetry exception format not supported");
+		return -EOPNOTSUPP;
+	}
+
+	hci_devcd_register(hdev, btintel_coredump, btintel_dmp_hdr, NULL);
+
+	return err;
+}
 
 static const struct firmware *btintel_legacy_rom_get_fw(struct hci_dev *hdev,
 					       struct intel_version *ver)
@@ -1782,19 +1877,19 @@ static int btintel_get_fw_name(struct intel_version *ver,
 	case 0x0b:	/* SfP */
 	case 0x0c:	/* WsP */
 		snprintf(fw_name, len, "intel/ibt-%u-%u.%s",
-			le16_to_cpu(ver->hw_variant),
-			le16_to_cpu(params->dev_revid),
-			suffix);
+			 ver->hw_variant,
+			 le16_to_cpu(params->dev_revid),
+			 suffix);
 		break;
 	case 0x11:	/* JfP */
 	case 0x12:	/* ThP */
 	case 0x13:	/* HrP */
 	case 0x14:	/* CcP */
 		snprintf(fw_name, len, "intel/ibt-%u-%u-%u.%s",
-			le16_to_cpu(ver->hw_variant),
-			le16_to_cpu(ver->hw_revision),
-			le16_to_cpu(ver->fw_revision),
-			suffix);
+			 ver->hw_variant,
+			 ver->hw_revision,
+			 ver->fw_revision,
+			 suffix);
 		break;
 	default:
 		return -EINVAL;
@@ -2042,15 +2137,62 @@ static void btintel_get_fw_name_tlv(const struct intel_version_tlv *ver,
 				    char *fw_name, size_t len,
 				    const char *suffix)
 {
-	/* The firmware file name for new generation controllers will be
+	const char *format;
+	u32 cnvi, cnvr;
+
+	cnvi = INTEL_CNVX_TOP_PACK_SWAB(INTEL_CNVX_TOP_TYPE(ver->cnvi_top),
+					INTEL_CNVX_TOP_STEP(ver->cnvi_top));
+
+	cnvr = INTEL_CNVX_TOP_PACK_SWAB(INTEL_CNVX_TOP_TYPE(ver->cnvr_top),
+					INTEL_CNVX_TOP_STEP(ver->cnvr_top));
+
+	/* Only Blazar  product supports downloading of intermediate loader
+	 * image
+	 */
+	if (INTEL_HW_VARIANT(ver->cnvi_bt) >= 0x1e) {
+		u8 zero[BTINTEL_FWID_MAXLEN];
+
+		if (ver->img_type == BTINTEL_IMG_BOOTLOADER) {
+			format = "intel/ibt-%04x-%04x-iml.%s";
+			snprintf(fw_name, len, format, cnvi, cnvr, suffix);
+			return;
+		}
+
+		memset(zero, 0, sizeof(zero));
+
+		/* ibt-<cnvi_top type+cnvi_top step>-<cnvr_top type+cnvr_top step-fw_id> */
+		if (memcmp(ver->fw_id, zero, sizeof(zero))) {
+			format = "intel/ibt-%04x-%04x-%s.%s";
+			snprintf(fw_name, len, format, cnvi, cnvr,
+				 ver->fw_id, suffix);
+			return;
+		}
+		/* If firmware id is not present, fallback to legacy naming
+		 * convention
+		 */
+	}
+	/* Fallback to legacy naming convention for other controllers
 	 * ibt-<cnvi_top type+cnvi_top step>-<cnvr_top type+cnvr_top step>
 	 */
-	snprintf(fw_name, len, "intel/ibt-%04x-%04x.%s",
-		 INTEL_CNVX_TOP_PACK_SWAB(INTEL_CNVX_TOP_TYPE(ver->cnvi_top),
-					  INTEL_CNVX_TOP_STEP(ver->cnvi_top)),
-		 INTEL_CNVX_TOP_PACK_SWAB(INTEL_CNVX_TOP_TYPE(ver->cnvr_top),
-					  INTEL_CNVX_TOP_STEP(ver->cnvr_top)),
-		 suffix);
+	format = "intel/ibt-%04x-%04x.%s";
+	snprintf(fw_name, len, format, cnvi, cnvr, suffix);
+}
+
+static void btintel_get_iml_tlv(const struct intel_version_tlv *ver,
+				char *fw_name, size_t len,
+				const char *suffix)
+{
+	const char *format;
+	u32 cnvi, cnvr;
+
+	cnvi = INTEL_CNVX_TOP_PACK_SWAB(INTEL_CNVX_TOP_TYPE(ver->cnvi_top),
+					INTEL_CNVX_TOP_STEP(ver->cnvi_top));
+
+	cnvr = INTEL_CNVX_TOP_PACK_SWAB(INTEL_CNVX_TOP_TYPE(ver->cnvr_top),
+					INTEL_CNVX_TOP_STEP(ver->cnvr_top));
+
+	format = "intel/ibt-%04x-%04x-iml.%s";
+	snprintf(fw_name, len, format, cnvi, cnvr, suffix);
 }
 
 static int btintel_prepare_fw_download_tlv(struct hci_dev *hdev,
@@ -2058,7 +2200,7 @@ static int btintel_prepare_fw_download_tlv(struct hci_dev *hdev,
 					   u32 *boot_param)
 {
 	const struct firmware *fw;
-	char fwname[64];
+	char fwname[128];
 	int err;
 	ktime_t calltime;
 
@@ -2078,7 +2220,7 @@ static int btintel_prepare_fw_download_tlv(struct hci_dev *hdev,
 	 * It is not possible to use the Secure Boot Parameters in this
 	 * case since that command is only available in bootloader mode.
 	 */
-	if (ver->img_type == 0x03) {
+	if (ver->img_type == BTINTEL_IMG_OP) {
 		btintel_clear_flag(hdev, INTEL_BOOTLOADER);
 		btintel_check_bdaddr(hdev);
 	} else {
@@ -2093,7 +2235,20 @@ static int btintel_prepare_fw_download_tlv(struct hci_dev *hdev,
 		}
 	}
 
-	btintel_get_fw_name_tlv(ver, fwname, sizeof(fwname), "sfi");
+	if (ver->img_type == BTINTEL_IMG_OP) {
+		/* Controller running OP image. In case of FW downgrade,
+		 * FWID TLV may not be present and driver may attempt to load
+		 * firmware image which doesn't exist. Lets compare the version
+		 * of IML image
+		 */
+		if (INTEL_HW_VARIANT(ver->cnvi_bt) >= 0x1e)
+			btintel_get_iml_tlv(ver, fwname, sizeof(fwname), "sfi");
+		else
+			btintel_get_fw_name_tlv(ver, fwname, sizeof(fwname), "sfi");
+	} else {
+		btintel_get_fw_name_tlv(ver, fwname, sizeof(fwname), "sfi");
+	}
+
 	err = firmware_request_nowarn(&fw, fwname, &hdev->dev);
 	if (err < 0) {
 		if (!btintel_test_flag(hdev, INTEL_BOOTLOADER)) {
@@ -2250,8 +2405,219 @@ error:
 	return err;
 }
 
-static int btintel_bootloader_setup_tlv(struct hci_dev *hdev,
-					struct intel_version_tlv *ver)
+static void btintel_set_ppag(struct hci_dev *hdev, struct intel_version_tlv *ver)
+{
+	struct sk_buff *skb;
+	struct hci_ppag_enable_cmd ppag_cmd;
+	acpi_handle handle;
+	struct acpi_buffer buffer = {ACPI_ALLOCATE_BUFFER, NULL};
+	union acpi_object *p, *elements;
+	u32 domain, mode;
+	acpi_status status;
+
+	/* PPAG is not supported if CRF is HrP2, Jfp2, JfP1 */
+	switch (ver->cnvr_top & 0xFFF) {
+	case 0x504:     /* Hrp2 */
+	case 0x202:     /* Jfp2 */
+	case 0x201:     /* Jfp1 */
+		bt_dev_dbg(hdev, "PPAG not supported for Intel CNVr (0x%3x)",
+			   ver->cnvr_top & 0xFFF);
+		return;
+	}
+
+	handle = ACPI_HANDLE(GET_HCIDEV_DEV(hdev));
+	if (!handle) {
+		bt_dev_info(hdev, "No support for BT device in ACPI firmware");
+		return;
+	}
+
+	status = acpi_evaluate_object(handle, "PPAG", NULL, &buffer);
+	if (ACPI_FAILURE(status)) {
+		if (status == AE_NOT_FOUND) {
+			bt_dev_dbg(hdev, "PPAG-BT: ACPI entry not found");
+			return;
+		}
+		bt_dev_warn(hdev, "PPAG-BT: ACPI Failure: %s", acpi_format_exception(status));
+		return;
+	}
+
+	p = buffer.pointer;
+	if (p->type != ACPI_TYPE_PACKAGE || p->package.count != 2) {
+		bt_dev_warn(hdev, "PPAG-BT: Invalid object type: %d or package count: %d",
+			    p->type, p->package.count);
+		kfree(buffer.pointer);
+		return;
+	}
+
+	elements = p->package.elements;
+
+	/* PPAG table is located at element[1] */
+	p = &elements[1];
+
+	domain = (u32)p->package.elements[0].integer.value;
+	mode = (u32)p->package.elements[1].integer.value;
+	kfree(buffer.pointer);
+
+	if (domain != 0x12) {
+		bt_dev_dbg(hdev, "PPAG-BT: Bluetooth domain is disabled in ACPI firmware");
+		return;
+	}
+
+	/* PPAG mode
+	 * BIT 0 : 0 Disabled in EU
+	 *         1 Enabled in EU
+	 * BIT 1 : 0 Disabled in China
+	 *         1 Enabled in China
+	 */
+	mode &= 0x03;
+
+	if (!mode) {
+		bt_dev_dbg(hdev, "PPAG-BT: EU, China mode are disabled in BIOS");
+		return;
+	}
+
+	ppag_cmd.ppag_enable_flags = cpu_to_le32(mode);
+
+	skb = __hci_cmd_sync(hdev, INTEL_OP_PPAG_CMD, sizeof(ppag_cmd),
+			     &ppag_cmd, HCI_CMD_TIMEOUT);
+	if (IS_ERR(skb)) {
+		bt_dev_warn(hdev, "Failed to send PPAG Enable (%ld)", PTR_ERR(skb));
+		return;
+	}
+	bt_dev_info(hdev, "PPAG-BT: Enabled (Mode %d)", mode);
+	kfree_skb(skb);
+}
+
+static int btintel_acpi_reset_method(struct hci_dev *hdev)
+{
+	int ret = 0;
+	acpi_status status;
+	union acpi_object *p, *ref;
+	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
+
+	status = acpi_evaluate_object(ACPI_HANDLE(GET_HCIDEV_DEV(hdev)), "_PRR", NULL, &buffer);
+	if (ACPI_FAILURE(status)) {
+		bt_dev_err(hdev, "Failed to run _PRR method");
+		ret = -ENODEV;
+		return ret;
+	}
+	p = buffer.pointer;
+
+	if (p->package.count != 1 || p->type != ACPI_TYPE_PACKAGE) {
+		bt_dev_err(hdev, "Invalid arguments");
+		ret = -EINVAL;
+		goto exit_on_error;
+	}
+
+	ref = &p->package.elements[0];
+	if (ref->type != ACPI_TYPE_LOCAL_REFERENCE) {
+		bt_dev_err(hdev, "Invalid object type: 0x%x", ref->type);
+		ret = -EINVAL;
+		goto exit_on_error;
+	}
+
+	status = acpi_evaluate_object(ref->reference.handle, "_RST", NULL, NULL);
+	if (ACPI_FAILURE(status)) {
+		bt_dev_err(hdev, "Failed to run_RST method");
+		ret = -ENODEV;
+		goto exit_on_error;
+	}
+
+exit_on_error:
+	kfree(buffer.pointer);
+	return ret;
+}
+
+static void btintel_set_dsm_reset_method(struct hci_dev *hdev,
+					 struct intel_version_tlv *ver_tlv)
+{
+	struct btintel_data *data = hci_get_priv(hdev);
+	acpi_handle handle = ACPI_HANDLE(GET_HCIDEV_DEV(hdev));
+	u8 reset_payload[4] = {0x01, 0x00, 0x01, 0x00};
+	union acpi_object *obj, argv4;
+	enum {
+		RESET_TYPE_WDISABLE2,
+		RESET_TYPE_VSEC
+	};
+
+	handle = ACPI_HANDLE(GET_HCIDEV_DEV(hdev));
+
+	if (!handle) {
+		bt_dev_dbg(hdev, "No support for bluetooth device in ACPI firmware");
+		return;
+	}
+
+	if (!acpi_has_method(handle, "_PRR")) {
+		bt_dev_err(hdev, "No support for _PRR ACPI method");
+		return;
+	}
+
+	switch (ver_tlv->cnvi_top & 0xfff) {
+	case 0x910: /* GalePeak2 */
+		reset_payload[2] = RESET_TYPE_VSEC;
+		break;
+	default:
+		/* WDISABLE2 is the default reset method */
+		reset_payload[2] = RESET_TYPE_WDISABLE2;
+
+		if (!acpi_check_dsm(handle, &btintel_guid_dsm, 0,
+				    BIT(DSM_SET_WDISABLE2_DELAY))) {
+			bt_dev_err(hdev, "No dsm support to set reset delay");
+			return;
+		}
+		argv4.integer.type = ACPI_TYPE_INTEGER;
+		/* delay required to toggle BT power */
+		argv4.integer.value = 160;
+		obj = acpi_evaluate_dsm(handle, &btintel_guid_dsm, 0,
+					DSM_SET_WDISABLE2_DELAY, &argv4);
+		if (!obj) {
+			bt_dev_err(hdev, "Failed to call dsm to set reset delay");
+			return;
+		}
+		ACPI_FREE(obj);
+	}
+
+	bt_dev_info(hdev, "DSM reset method type: 0x%02x", reset_payload[2]);
+
+	if (!acpi_check_dsm(handle, &btintel_guid_dsm, 0,
+			    DSM_SET_RESET_METHOD)) {
+		bt_dev_warn(hdev, "No support for dsm to set reset method");
+		return;
+	}
+	argv4.buffer.type = ACPI_TYPE_BUFFER;
+	argv4.buffer.length = sizeof(reset_payload);
+	argv4.buffer.pointer = reset_payload;
+
+	obj = acpi_evaluate_dsm(handle, &btintel_guid_dsm, 0,
+				DSM_SET_RESET_METHOD, &argv4);
+	if (!obj) {
+		bt_dev_err(hdev, "Failed to call dsm to set reset method");
+		return;
+	}
+	ACPI_FREE(obj);
+	data->acpi_reset_method = btintel_acpi_reset_method;
+}
+
+#define BTINTEL_ISODATA_HANDLE_BASE 0x900
+
+static u8 btintel_classify_pkt_type(struct hci_dev *hdev, struct sk_buff *skb)
+{
+	/*
+	 * Distinguish ISO data packets form ACL data packets
+	 * based on their connection handle value range.
+	 */
+	if (hci_skb_pkt_type(skb) == HCI_ACLDATA_PKT) {
+		__u16 handle = __le16_to_cpu(hci_acl_hdr(skb)->handle);
+
+		if (hci_handle(handle) >= BTINTEL_ISODATA_HANDLE_BASE)
+			return HCI_ISODATA_PKT;
+	}
+
+	return hci_skb_pkt_type(skb);
+}
+
+int btintel_bootloader_setup_tlv(struct hci_dev *hdev,
+				 struct intel_version_tlv *ver)
 {
 	u32 boot_param;
 	char ddcname[64];
@@ -2273,12 +2639,29 @@ static int btintel_bootloader_setup_tlv(struct hci_dev *hdev,
 		return err;
 
 	/* check if controller is already having an operational firmware */
-	if (ver->img_type == 0x03)
+	if (ver->img_type == BTINTEL_IMG_OP)
 		goto finish;
 
 	err = btintel_boot(hdev, boot_param);
 	if (err)
 		return err;
+
+	err = btintel_read_version_tlv(hdev, ver);
+	if (err)
+		return err;
+
+	/* If image type returned is BTINTEL_IMG_IML, then controller supports
+	 * intermediate loader image
+	 */
+	if (ver->img_type == BTINTEL_IMG_IML) {
+		err = btintel_prepare_fw_download_tlv(hdev, ver, &boot_param);
+		if (err)
+			return err;
+
+		err = btintel_boot(hdev, boot_param);
+		if (err)
+			return err;
+	}
 
 	btintel_clear_flag(hdev, INTEL_BOOTLOADER);
 
@@ -2295,6 +2678,9 @@ static int btintel_bootloader_setup_tlv(struct hci_dev *hdev,
 	btintel_configure_offload(hdev);
 
 	hci_dev_clear_flag(hdev, HCI_QUALITY_REPORT);
+
+	/* Set PPAG feature */
+	btintel_set_ppag(hdev, ver);
 
 	/* Read the Intel version information after loading the FW  */
 	err = btintel_read_version_tlv(hdev, &new_ver);
@@ -2315,8 +2701,9 @@ finish:
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(btintel_bootloader_setup_tlv);
 
-static void btintel_set_msft_opcode(struct hci_dev *hdev, u8 hw_variant)
+void btintel_set_msft_opcode(struct hci_dev *hdev, u8 hw_variant)
 {
 	switch (hw_variant) {
 	/* Legacy bootloader devices that supports MSFT Extension */
@@ -2330,6 +2717,10 @@ static void btintel_set_msft_opcode(struct hci_dev *hdev, u8 hw_variant)
 	case 0x17:
 	case 0x18:
 	case 0x19:
+	case 0x1b:
+	case 0x1c:
+	case 0x1d:
+	case 0x1e:
 		hci_set_msft_opcode(hdev, 0xFC1E);
 		break;
 	default:
@@ -2337,6 +2728,121 @@ static void btintel_set_msft_opcode(struct hci_dev *hdev, u8 hw_variant)
 		break;
 	}
 }
+EXPORT_SYMBOL_GPL(btintel_set_msft_opcode);
+
+void btintel_print_fseq_info(struct hci_dev *hdev)
+{
+	struct sk_buff *skb;
+	u8 *p;
+	u32 val;
+	const char *str;
+
+	skb = __hci_cmd_sync(hdev, 0xfcb3, 0, NULL, HCI_CMD_TIMEOUT);
+	if (IS_ERR(skb)) {
+		bt_dev_dbg(hdev, "Reading fseq status command failed (%ld)",
+			   PTR_ERR(skb));
+		return;
+	}
+
+	if (skb->len < (sizeof(u32) * 16 + 2)) {
+		bt_dev_dbg(hdev, "Malformed packet of length %u received",
+			   skb->len);
+		kfree_skb(skb);
+		return;
+	}
+
+	p = skb_pull_data(skb, 1);
+	if (*p) {
+		bt_dev_dbg(hdev, "Failed to get fseq status (0x%2.2x)", *p);
+		kfree_skb(skb);
+		return;
+	}
+
+	p = skb_pull_data(skb, 1);
+	switch (*p) {
+	case 0:
+		str = "Success";
+		break;
+	case 1:
+		str = "Fatal error";
+		break;
+	case 2:
+		str = "Semaphore acquire error";
+		break;
+	default:
+		str = "Unknown error";
+		break;
+	}
+
+	if (*p) {
+		bt_dev_err(hdev, "Fseq status: %s (0x%2.2x)", str, *p);
+		kfree_skb(skb);
+		return;
+	}
+
+	bt_dev_info(hdev, "Fseq status: %s (0x%2.2x)", str, *p);
+
+	val = get_unaligned_le32(skb_pull_data(skb, 4));
+	bt_dev_dbg(hdev, "Reason: 0x%8.8x", val);
+
+	val = get_unaligned_le32(skb_pull_data(skb, 4));
+	bt_dev_dbg(hdev, "Global version: 0x%8.8x", val);
+
+	val = get_unaligned_le32(skb_pull_data(skb, 4));
+	bt_dev_dbg(hdev, "Installed version: 0x%8.8x", val);
+
+	p = skb->data;
+	skb_pull_data(skb, 4);
+	bt_dev_info(hdev, "Fseq executed: %2.2u.%2.2u.%2.2u.%2.2u", p[0], p[1],
+		    p[2], p[3]);
+
+	p = skb->data;
+	skb_pull_data(skb, 4);
+	bt_dev_info(hdev, "Fseq BT Top: %2.2u.%2.2u.%2.2u.%2.2u", p[0], p[1],
+		    p[2], p[3]);
+
+	val = get_unaligned_le32(skb_pull_data(skb, 4));
+	bt_dev_dbg(hdev, "Fseq Top init version: 0x%8.8x", val);
+
+	val = get_unaligned_le32(skb_pull_data(skb, 4));
+	bt_dev_dbg(hdev, "Fseq Cnvio init version: 0x%8.8x", val);
+
+	val = get_unaligned_le32(skb_pull_data(skb, 4));
+	bt_dev_dbg(hdev, "Fseq MBX Wifi file version: 0x%8.8x", val);
+
+	val = get_unaligned_le32(skb_pull_data(skb, 4));
+	bt_dev_dbg(hdev, "Fseq BT version: 0x%8.8x", val);
+
+	val = get_unaligned_le32(skb_pull_data(skb, 4));
+	bt_dev_dbg(hdev, "Fseq Top reset address: 0x%8.8x", val);
+
+	val = get_unaligned_le32(skb_pull_data(skb, 4));
+	bt_dev_dbg(hdev, "Fseq MBX timeout: 0x%8.8x", val);
+
+	val = get_unaligned_le32(skb_pull_data(skb, 4));
+	bt_dev_dbg(hdev, "Fseq MBX ack: 0x%8.8x", val);
+
+	val = get_unaligned_le32(skb_pull_data(skb, 4));
+	bt_dev_dbg(hdev, "Fseq CNVi id: 0x%8.8x", val);
+
+	val = get_unaligned_le32(skb_pull_data(skb, 4));
+	bt_dev_dbg(hdev, "Fseq CNVr id: 0x%8.8x", val);
+
+	val = get_unaligned_le32(skb_pull_data(skb, 4));
+	bt_dev_dbg(hdev, "Fseq Error handle: 0x%8.8x", val);
+
+	val = get_unaligned_le32(skb_pull_data(skb, 4));
+	bt_dev_dbg(hdev, "Fseq Magic noalive indication: 0x%8.8x", val);
+
+	val = get_unaligned_le32(skb_pull_data(skb, 4));
+	bt_dev_dbg(hdev, "Fseq OTP version: 0x%8.8x", val);
+
+	val = get_unaligned_le32(skb_pull_data(skb, 4));
+	bt_dev_dbg(hdev, "Fseq MBX otp version: 0x%8.8x", val);
+
+	kfree_skb(skb);
+}
+EXPORT_SYMBOL_GPL(btintel_print_fseq_info);
 
 static int btintel_setup_combined(struct hci_dev *hdev)
 {
@@ -2428,21 +2934,31 @@ static int btintel_setup_combined(struct hci_dev *hdev)
 
 			/* Apply the device specific HCI quirks
 			 *
-			 * WBS for SdP - SdP and Stp have a same hw_varaint but
-			 * different fw_variant
+			 * WBS for SdP - For the Legacy ROM products, only SdP
+			 * supports the WBS. But the version information is not
+			 * enough to use here because the StP2 and SdP have same
+			 * hw_variant and fw_variant. So, this flag is set by
+			 * the transport driver (btusb) based on the HW info
+			 * (idProduct)
 			 */
-			if (ver.hw_variant == 0x08 && ver.fw_variant == 0x22)
+			if (!btintel_test_flag(hdev,
+					       INTEL_ROM_LEGACY_NO_WBS_SUPPORT))
 				set_bit(HCI_QUIRK_WIDEBAND_SPEECH_SUPPORTED,
+					&hdev->quirks);
+			if (ver.hw_variant == 0x08 && ver.fw_variant == 0x22)
+				set_bit(HCI_QUIRK_VALID_LE_STATES,
 					&hdev->quirks);
 
 			err = btintel_legacy_rom_setup(hdev, &ver);
 			break;
 		case 0x0b:      /* SfP */
-		case 0x0c:      /* WsP */
 		case 0x11:      /* JfP */
 		case 0x12:      /* ThP */
 		case 0x13:      /* HrP */
 		case 0x14:      /* CcP */
+			set_bit(HCI_QUIRK_VALID_LE_STATES, &hdev->quirks);
+			fallthrough;
+		case 0x0c:	/* WsP */
 			/* Apply the device specific HCI quirks
 			 *
 			 * All Legacy bootloader devices support WBS
@@ -2450,21 +2966,25 @@ static int btintel_setup_combined(struct hci_dev *hdev)
 			set_bit(HCI_QUIRK_WIDEBAND_SPEECH_SUPPORTED,
 				&hdev->quirks);
 
-			/* Valid LE States quirk for JfP/ThP familiy */
-			if (ver.hw_variant == 0x11 || ver.hw_variant == 0x12)
-				set_bit(HCI_QUIRK_VALID_LE_STATES,
-					&hdev->quirks);
+			/* These variants don't seem to support LE Coded PHY */
+			set_bit(HCI_QUIRK_BROKEN_LE_CODED, &hdev->quirks);
 
 			/* Setup MSFT Extension support */
 			btintel_set_msft_opcode(hdev, ver.hw_variant);
 
 			err = btintel_bootloader_setup(hdev, &ver);
+			btintel_register_devcoredump_support(hdev);
 			break;
 		default:
 			bt_dev_err(hdev, "Unsupported Intel hw variant (%u)",
 				   ver.hw_variant);
 			err = -EINVAL;
 		}
+
+		hci_set_hw_info(hdev,
+				"INTEL platform=%u variant=%u revision=%u",
+				ver.hw_platform, ver.hw_variant,
+				ver.hw_revision);
 
 		goto exit_error;
 	}
@@ -2517,7 +3037,7 @@ static int btintel_setup_combined(struct hci_dev *hdev)
 		 */
 		err = btintel_read_version(hdev, &ver);
 		if (err)
-			return err;
+			break;
 
 		/* Apply the device specific HCI quirks
 		 *
@@ -2525,18 +3045,28 @@ static int btintel_setup_combined(struct hci_dev *hdev)
 		 */
 		set_bit(HCI_QUIRK_WIDEBAND_SPEECH_SUPPORTED, &hdev->quirks);
 
-		/* Valid LE States quirk for JfP/ThP familiy */
-		if (ver.hw_variant == 0x11 || ver.hw_variant == 0x12)
-			set_bit(HCI_QUIRK_VALID_LE_STATES, &hdev->quirks);
+		/* These variants don't seem to support LE Coded PHY */
+		set_bit(HCI_QUIRK_BROKEN_LE_CODED, &hdev->quirks);
+
+		/* Set Valid LE States quirk */
+		set_bit(HCI_QUIRK_VALID_LE_STATES, &hdev->quirks);
 
 		/* Setup MSFT Extension support */
 		btintel_set_msft_opcode(hdev, ver.hw_variant);
 
 		err = btintel_bootloader_setup(hdev, &ver);
+		btintel_register_devcoredump_support(hdev);
 		break;
+	case 0x18: /* GfP2 */
+	case 0x1c: /* GaP */
+		/* Re-classify packet type for controllers with LE audio */
+		hdev->classify_pkt_type = btintel_classify_pkt_type;
+		fallthrough;
 	case 0x17:
-	case 0x18:
 	case 0x19:
+	case 0x1b:
+	case 0x1d:
+	case 0x1e:
 		/* Display version information of TLV type */
 		btintel_version_info_tlv(hdev, &ver_tlv);
 
@@ -2546,21 +3076,28 @@ static int btintel_setup_combined(struct hci_dev *hdev)
 		 */
 		set_bit(HCI_QUIRK_WIDEBAND_SPEECH_SUPPORTED, &hdev->quirks);
 
-		/* Valid LE States quirk for GfP */
-		if (INTEL_HW_VARIANT(ver_tlv.cnvi_bt) == 0x18)
-			set_bit(HCI_QUIRK_VALID_LE_STATES, &hdev->quirks);
+		/* Apply LE States quirk from solar onwards */
+		set_bit(HCI_QUIRK_VALID_LE_STATES, &hdev->quirks);
 
 		/* Setup MSFT Extension support */
 		btintel_set_msft_opcode(hdev,
 					INTEL_HW_VARIANT(ver_tlv.cnvi_bt));
+		btintel_set_dsm_reset_method(hdev, &ver_tlv);
 
 		err = btintel_bootloader_setup_tlv(hdev, &ver_tlv);
+		btintel_register_devcoredump_support(hdev);
+		btintel_print_fseq_info(hdev);
 		break;
 	default:
 		bt_dev_err(hdev, "Unsupported Intel hw variant (%u)",
 			   INTEL_HW_VARIANT(ver_tlv.cnvi_bt));
-		return -EINVAL;
+		err = -EINVAL;
+		break;
 	}
+
+	hci_set_hw_info(hdev, "INTEL platform=%u variant=%u",
+			INTEL_HW_PLATFORM(ver_tlv.cnvi_bt),
+			INTEL_HW_VARIANT(ver_tlv.cnvi_bt));
 
 exit_error:
 	kfree_skb(skb);
@@ -2568,7 +3105,7 @@ exit_error:
 	return err;
 }
 
-static int btintel_shutdown_combined(struct hci_dev *hdev)
+int btintel_shutdown_combined(struct hci_dev *hdev)
 {
 	struct sk_buff *skb;
 	int ret;
@@ -2602,8 +3139,9 @@ static int btintel_shutdown_combined(struct hci_dev *hdev)
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(btintel_shutdown_combined);
 
-int btintel_configure_setup(struct hci_dev *hdev)
+int btintel_configure_setup(struct hci_dev *hdev, const char *driver_name)
 {
 	hdev->manufacturer = 2;
 	hdev->setup = btintel_setup_combined;
@@ -2612,9 +3150,85 @@ int btintel_configure_setup(struct hci_dev *hdev)
 	hdev->set_diag = btintel_set_diag_combined;
 	hdev->set_bdaddr = btintel_set_bdaddr;
 
+	coredump_info.driver_name = driver_name;
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(btintel_configure_setup);
+
+static int btintel_diagnostics(struct hci_dev *hdev, struct sk_buff *skb)
+{
+	struct intel_tlv *tlv = (void *)&skb->data[5];
+
+	/* The first event is always an event type TLV */
+	if (tlv->type != INTEL_TLV_TYPE_ID)
+		goto recv_frame;
+
+	switch (tlv->val[0]) {
+	case INTEL_TLV_SYSTEM_EXCEPTION:
+	case INTEL_TLV_FATAL_EXCEPTION:
+	case INTEL_TLV_DEBUG_EXCEPTION:
+	case INTEL_TLV_TEST_EXCEPTION:
+		/* Generate devcoredump from exception */
+		if (!hci_devcd_init(hdev, skb->len)) {
+			hci_devcd_append(hdev, skb);
+			hci_devcd_complete(hdev);
+		} else {
+			bt_dev_err(hdev, "Failed to generate devcoredump");
+			kfree_skb(skb);
+		}
+		return 0;
+	default:
+		bt_dev_err(hdev, "Invalid exception type %02X", tlv->val[0]);
+	}
+
+recv_frame:
+	return hci_recv_frame(hdev, skb);
+}
+
+int btintel_recv_event(struct hci_dev *hdev, struct sk_buff *skb)
+{
+	struct hci_event_hdr *hdr = (void *)skb->data;
+	const char diagnostics_hdr[] = { 0x87, 0x80, 0x03 };
+
+	if (skb->len > HCI_EVENT_HDR_SIZE && hdr->evt == 0xff &&
+	    hdr->plen > 0) {
+		const void *ptr = skb->data + HCI_EVENT_HDR_SIZE + 1;
+		unsigned int len = skb->len - HCI_EVENT_HDR_SIZE - 1;
+
+		if (btintel_test_flag(hdev, INTEL_BOOTLOADER)) {
+			switch (skb->data[2]) {
+			case 0x02:
+				/* When switching to the operational firmware
+				 * the device sends a vendor specific event
+				 * indicating that the bootup completed.
+				 */
+				btintel_bootup(hdev, ptr, len);
+				break;
+			case 0x06:
+				/* When the firmware loading completes the
+				 * device sends out a vendor specific event
+				 * indicating the result of the firmware
+				 * loading.
+				 */
+				btintel_secure_send_result(hdev, ptr, len);
+				break;
+			}
+		}
+
+		/* Handle all diagnostics events separately. May still call
+		 * hci_recv_frame.
+		 */
+		if (len >= sizeof(diagnostics_hdr) &&
+		    memcmp(&skb->data[2], diagnostics_hdr,
+			   sizeof(diagnostics_hdr)) == 0) {
+			return btintel_diagnostics(hdev, skb);
+		}
+	}
+
+	return hci_recv_frame(hdev, skb);
+}
+EXPORT_SYMBOL_GPL(btintel_recv_event);
 
 void btintel_bootup(struct hci_dev *hdev, const void *ptr, unsigned int len)
 {

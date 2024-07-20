@@ -50,7 +50,6 @@ enum dma_status {
  */
 enum dma_transaction_type {
 	DMA_MEMCPY,
-	DMA_MEMCPY_SG,
 	DMA_XOR,
 	DMA_PQ,
 	DMA_XOR_VAL,
@@ -159,6 +158,16 @@ struct dma_interleaved_template {
 	size_t numf;
 	size_t frame_size;
 	struct data_chunk sgl[];
+};
+
+/**
+ * struct dma_vec - DMA vector
+ * @addr: Bus address of the start of the vector
+ * @len: Length in bytes of the DMA vector
+ */
+struct dma_vec {
+	dma_addr_t addr;
+	size_t len;
 };
 
 /**
@@ -395,7 +404,7 @@ enum dma_slave_buswidth {
  * should be read (RX), if the source is memory this argument is
  * ignored.
  * @dst_addr: this is the physical address where DMA slave data
- * should be written (TX), if the source is memory this argument
+ * should be written (TX), if the destination is memory this argument
  * is ignored.
  * @src_addr_width: this is the width in bytes of the source (RX)
  * register where DMA data shall be read. If the source
@@ -517,8 +526,6 @@ static inline const char *dma_chan_name(struct dma_chan *chan)
 {
 	return dev_name(&chan->dev->device);
 }
-
-void dma_chan_cleanup(struct kref *kref);
 
 /**
  * typedef dma_filter_fn - callback filter for dma_request_channel
@@ -774,6 +781,7 @@ struct dma_filter {
 
 /**
  * struct dma_device - info on the entity supplying DMA services
+ * @ref: reference is taken and put every time a channel is allocated or freed
  * @chancnt: how many DMA channels are supported
  * @privatecnt: how many DMA channels are requested by dma_request_channel
  * @channels: the list of struct dma_chan
@@ -790,6 +798,7 @@ struct dma_filter {
  * @dev_id: unique device ID
  * @dev: struct device reference for dma mapping api
  * @owner: owner module (automatically set based on the provided dev)
+ * @chan_ida: unique channel ID
  * @src_addr_widths: bit mask of src addr widths the device supports
  *	Width is specified in bytes, e.g. for a device supporting
  *	a width of 4 the mask should have BIT(4) set.
@@ -803,6 +812,7 @@ struct dma_filter {
  * @max_sg_burst: max number of SG list entries executed in a single burst
  *	DMA tansaction with no software intervention for reinitialization.
  *	Zero value means unlimited number of entries.
+ * @descriptor_reuse: a submitted transfer can be resubmitted after completion
  * @residue_granularity: granularity of the transfer residue reported
  *	by tx_status
  * @device_alloc_chan_resources: allocate resources and return the
@@ -840,7 +850,6 @@ struct dma_filter {
  *	struct with auxiliary transfer status information, otherwise the call
  *	will just return a simple status code
  * @device_issue_pending: push pending transactions to hardware
- * @descriptor_reuse: a submitted transfer can be resubmitted after completion
  * @device_release: called sometime atfer dma_async_device_unregister() is
  *     called and there are no further references to this structure. This
  *     must be implemented to free resources however many existing drivers
@@ -848,6 +857,7 @@ struct dma_filter {
  * @dbg_summary_show: optional routine to show contents in debugfs; default code
  *     will be used when this is omitted, but custom code can show extra,
  *     controller specific information.
+ * @dbg_dev_root: the root folder in debugfs for this device
  */
 struct dma_device {
 	struct kref ref;
@@ -856,7 +866,7 @@ struct dma_device {
 	struct list_head channels;
 	struct list_head global_node;
 	struct dma_filter filter;
-	dma_cap_mask_t  cap_mask;
+	dma_cap_mask_t cap_mask;
 	enum dma_desc_metadata_mode desc_metadata_modes;
 	unsigned short max_xor;
 	unsigned short max_pq;
@@ -870,7 +880,6 @@ struct dma_device {
 	struct device *dev;
 	struct module *owner;
 	struct ida chan_ida;
-	struct mutex chan_mutex;	/* to protect chan_ida */
 
 	u32 src_addr_widths;
 	u32 dst_addr_widths;
@@ -888,11 +897,6 @@ struct dma_device {
 	struct dma_async_tx_descriptor *(*device_prep_dma_memcpy)(
 		struct dma_chan *chan, dma_addr_t dst, dma_addr_t src,
 		size_t len, unsigned long flags);
-	struct dma_async_tx_descriptor *(*device_prep_dma_memcpy_sg)(
-		struct dma_chan *chan,
-		struct scatterlist *dst_sg, unsigned int dst_nents,
-		struct scatterlist *src_sg, unsigned int src_nents,
-		unsigned long flags);
 	struct dma_async_tx_descriptor *(*device_prep_dma_xor)(
 		struct dma_chan *chan, dma_addr_t dst, dma_addr_t *src,
 		unsigned int src_cnt, size_t len, unsigned long flags);
@@ -916,6 +920,10 @@ struct dma_device {
 	struct dma_async_tx_descriptor *(*device_prep_dma_interrupt)(
 		struct dma_chan *chan, unsigned long flags);
 
+	struct dma_async_tx_descriptor *(*device_prep_peripheral_dma_vec)(
+		struct dma_chan *chan, const struct dma_vec *vecs,
+		size_t nents, enum dma_transfer_direction direction,
+		unsigned long flags);
 	struct dma_async_tx_descriptor *(*device_prep_slave_sg)(
 		struct dma_chan *chan, struct scatterlist *sgl,
 		unsigned int sg_len, enum dma_transfer_direction direction,
@@ -931,10 +939,8 @@ struct dma_device {
 		struct dma_chan *chan, dma_addr_t dst, u64 data,
 		unsigned long flags);
 
-	void (*device_caps)(struct dma_chan *chan,
-			    struct dma_slave_caps *caps);
-	int (*device_config)(struct dma_chan *chan,
-			     struct dma_slave_config *config);
+	void (*device_caps)(struct dma_chan *chan, struct dma_slave_caps *caps);
+	int (*device_config)(struct dma_chan *chan, struct dma_slave_config *config);
 	int (*device_pause)(struct dma_chan *chan);
 	int (*device_resume)(struct dma_chan *chan);
 	int (*device_terminate_all)(struct dma_chan *chan);
@@ -961,7 +967,8 @@ static inline int dmaengine_slave_config(struct dma_chan *chan,
 
 static inline bool is_slave_direction(enum dma_transfer_direction direction)
 {
-	return (direction == DMA_MEM_TO_DEV) || (direction == DMA_DEV_TO_MEM);
+	return (direction == DMA_MEM_TO_DEV) || (direction == DMA_DEV_TO_MEM) ||
+	       (direction == DMA_DEV_TO_DEV);
 }
 
 static inline struct dma_async_tx_descriptor *dmaengine_prep_slave_single(
@@ -978,6 +985,25 @@ static inline struct dma_async_tx_descriptor *dmaengine_prep_slave_single(
 
 	return chan->device->device_prep_slave_sg(chan, &sg, 1,
 						  dir, flags, NULL);
+}
+
+/**
+ * dmaengine_prep_peripheral_dma_vec() - Prepare a DMA scatter-gather descriptor
+ * @chan: The channel to be used for this descriptor
+ * @vecs: The array of DMA vectors that should be transferred
+ * @nents: The number of DMA vectors in the array
+ * @dir: Specifies the direction of the data transfer
+ * @flags: DMA engine flags
+ */
+static inline struct dma_async_tx_descriptor *dmaengine_prep_peripheral_dma_vec(
+	struct dma_chan *chan, const struct dma_vec *vecs, size_t nents,
+	enum dma_transfer_direction dir, unsigned long flags)
+{
+	if (!chan || !chan->device || !chan->device->device_prep_peripheral_dma_vec)
+		return NULL;
+
+	return chan->device->device_prep_peripheral_dma_vec(chan, vecs, nents,
+							    dir, flags);
 }
 
 static inline struct dma_async_tx_descriptor *dmaengine_prep_slave_sg(
@@ -1031,6 +1057,14 @@ static inline struct dma_async_tx_descriptor *dmaengine_prep_interleaved_dma(
 	return chan->device->device_prep_interleaved_dma(chan, xt, flags);
 }
 
+/**
+ * dmaengine_prep_dma_memset() - Prepare a DMA memset descriptor.
+ * @chan: The channel to be used for this descriptor
+ * @dest: Address of buffer to be set
+ * @value: Treated as a single byte value that fills the destination buffer
+ * @len: The total size of dest
+ * @flags: DMA engine flags
+ */
 static inline struct dma_async_tx_descriptor *dmaengine_prep_dma_memset(
 		struct dma_chan *chan, dma_addr_t dest, int value, size_t len,
 		unsigned long flags)
@@ -1051,20 +1085,6 @@ static inline struct dma_async_tx_descriptor *dmaengine_prep_dma_memcpy(
 
 	return chan->device->device_prep_dma_memcpy(chan, dest, src,
 						    len, flags);
-}
-
-static inline struct dma_async_tx_descriptor *dmaengine_prep_dma_memcpy_sg(
-		struct dma_chan *chan,
-		struct scatterlist *dst_sg, unsigned int dst_nents,
-		struct scatterlist *src_sg, unsigned int src_nents,
-		unsigned long flags)
-{
-	if (!chan || !chan->device || !chan->device->device_prep_dma_memcpy_sg)
-		return NULL;
-
-	return chan->device->device_prep_dma_memcpy_sg(chan, dst_sg, dst_nents,
-						       src_sg, src_nents,
-						       flags);
 }
 
 static inline bool dmaengine_is_metadata_mode_supported(struct dma_chan *chan,

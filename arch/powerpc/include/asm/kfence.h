@@ -11,11 +11,34 @@
 #include <linux/mm.h>
 #include <asm/pgtable.h>
 
-static inline bool arch_kfence_init_pool(void)
+#ifdef CONFIG_PPC64_ELF_ABI_V1
+#define ARCH_FUNC_PREFIX "."
+#endif
+
+#ifdef CONFIG_KFENCE
+extern bool kfence_disabled;
+
+static inline void disable_kfence(void)
 {
-	return true;
+	kfence_disabled = true;
 }
 
+static inline bool arch_kfence_init_pool(void)
+{
+	return !kfence_disabled;
+}
+#endif
+
+#ifdef CONFIG_PPC64
+static inline bool kfence_protect_page(unsigned long addr, bool protect)
+{
+	struct page *page = virt_to_page((void *)addr);
+
+	__kernel_map_pages(page, 1, !protect);
+
+	return true;
+}
+#else
 static inline bool kfence_protect_page(unsigned long addr, bool protect)
 {
 	pte_t *kpte = virt_to_kpte(addr);
@@ -29,5 +52,6 @@ static inline bool kfence_protect_page(unsigned long addr, bool protect)
 
 	return true;
 }
+#endif
 
 #endif /* __ASM_POWERPC_KFENCE_H */

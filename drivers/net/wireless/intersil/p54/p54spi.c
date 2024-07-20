@@ -28,6 +28,7 @@
 #endif /* CONFIG_P54_SPI_DEFAULT_EEPROM */
 
 MODULE_FIRMWARE("3826.arm");
+MODULE_FIRMWARE("3826.eeprom");
 
 /* gpios should be handled in board files and provided via platform data,
  * but because it's currently impossible for p54spi to have a header file
@@ -164,7 +165,7 @@ static int p54spi_request_firmware(struct ieee80211_hw *dev)
 
 	ret = p54_parse_firmware(dev, priv->firmware);
 	if (ret) {
-		release_firmware(priv->firmware);
+		/* the firmware is released by the caller */
 		return ret;
 	}
 
@@ -517,7 +518,7 @@ out:
 static int p54spi_op_start(struct ieee80211_hw *dev)
 {
 	struct p54s_priv *priv = dev->priv;
-	unsigned long timeout;
+	long time_left;
 	int ret = 0;
 
 	if (mutex_lock_interruptible(&priv->mutex)) {
@@ -537,10 +538,10 @@ static int p54spi_op_start(struct ieee80211_hw *dev)
 
 	mutex_unlock(&priv->mutex);
 
-	timeout = msecs_to_jiffies(2000);
-	timeout = wait_for_completion_interruptible_timeout(&priv->fw_comp,
-							    timeout);
-	if (!timeout) {
+	time_left = msecs_to_jiffies(2000);
+	time_left = wait_for_completion_interruptible_timeout(&priv->fw_comp,
+							      time_left);
+	if (!time_left) {
 		dev_err(&priv->spi->dev, "firmware boot failed");
 		p54spi_power_off(priv);
 		ret = -1;
@@ -659,6 +660,7 @@ static int p54spi_probe(struct spi_device *spi)
 	return 0;
 
 err_free_common:
+	release_firmware(priv->firmware);
 	free_irq(gpio_to_irq(p54spi_gpio_irq), spi);
 err_free_gpio_irq:
 	gpio_free(p54spi_gpio_irq);
@@ -669,7 +671,7 @@ err_free:
 	return ret;
 }
 
-static int p54spi_remove(struct spi_device *spi)
+static void p54spi_remove(struct spi_device *spi)
 {
 	struct p54s_priv *priv = spi_get_drvdata(spi);
 
@@ -684,8 +686,6 @@ static int p54spi_remove(struct spi_device *spi)
 	mutex_destroy(&priv->mutex);
 
 	p54_free_common(priv->hw);
-
-	return 0;
 }
 
 
@@ -700,6 +700,7 @@ static struct spi_driver p54spi_driver = {
 
 module_spi_driver(p54spi_driver);
 
+MODULE_DESCRIPTION("Prism54 SPI wireless driver");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Christian Lamparter <chunkeey@web.de>");
 MODULE_ALIAS("spi:cx3110x");

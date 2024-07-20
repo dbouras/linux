@@ -237,7 +237,6 @@ enum gp2ap020a00f_thresh_val_id {
 };
 
 struct gp2ap020a00f_data {
-	const struct gp2ap020a00f_platform_data *pdata;
 	struct i2c_client *client;
 	struct mutex lock;
 	char *buffer;
@@ -1467,9 +1466,9 @@ static const struct iio_buffer_setup_ops gp2ap020a00f_buffer_setup_ops = {
 	.predisable = &gp2ap020a00f_buffer_predisable,
 };
 
-static int gp2ap020a00f_probe(struct i2c_client *client,
-				const struct i2c_device_id *id)
+static int gp2ap020a00f_probe(struct i2c_client *client)
 {
+	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct gp2ap020a00f_data *data;
 	struct iio_dev *indio_dev;
 	struct regmap *regmap;
@@ -1573,7 +1572,7 @@ error_regulator_disable:
 	return err;
 }
 
-static int gp2ap020a00f_remove(struct i2c_client *client)
+static void gp2ap020a00f_remove(struct i2c_client *client)
 {
 	struct iio_dev *indio_dev = i2c_get_clientdata(client);
 	struct gp2ap020a00f_data *data = iio_priv(indio_dev);
@@ -1589,12 +1588,10 @@ static int gp2ap020a00f_remove(struct i2c_client *client)
 	free_irq(client->irq, indio_dev);
 	iio_triggered_buffer_cleanup(indio_dev);
 	regulator_disable(data->vled_reg);
-
-	return 0;
 }
 
 static const struct i2c_device_id gp2ap020a00f_id[] = {
-	{ GP2A_I2C_NAME, 0 },
+	{ GP2A_I2C_NAME },
 	{ }
 };
 

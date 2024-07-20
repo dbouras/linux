@@ -217,7 +217,8 @@ const struct file_operations vboxsf_reg_fops = {
 	.open = vboxsf_file_open,
 	.release = vboxsf_file_release,
 	.fsync = noop_fsync,
-	.splice_read = generic_file_splice_read,
+	.splice_read = filemap_splice_read,
+	.setlease = simple_nosetlease,
 };
 
 const struct inode_operations vboxsf_reg_iops = {
@@ -225,27 +226,21 @@ const struct inode_operations vboxsf_reg_iops = {
 	.setattr = vboxsf_setattr
 };
 
-static int vboxsf_readpage(struct file *file, struct page *page)
+static int vboxsf_read_folio(struct file *file, struct folio *folio)
 {
 	struct vboxsf_handle *sf_handle = file->private_data;
-	loff_t off = page_offset(page);
+	loff_t off = folio_pos(folio);
 	u32 nread = PAGE_SIZE;
 	u8 *buf;
 	int err;
 
-	buf = kmap(page);
+	buf = kmap_local_folio(folio, 0);
 
 	err = vboxsf_read(sf_handle->root, sf_handle->handle, off, &nread, buf);
-	if (err == 0) {
-		memset(&buf[nread], 0, PAGE_SIZE - nread);
-		flush_dcache_page(page);
-		SetPageUptodate(page);
-	} else {
-		SetPageError(page);
-	}
+	buf = folio_zero_tail(folio, nread, buf + nread);
 
-	kunmap(page);
-	unlock_page(page);
+	kunmap_local(buf);
+	folio_end_read(folio, err == 0);
 	return err;
 }
 
@@ -293,7 +288,6 @@ static int vboxsf_writepage(struct page *page, struct writeback_control *wbc)
 	kref_put(&sf_handle->refcount, vboxsf_handle_release);
 
 	if (err == 0) {
-		ClearPageError(page);
 		/* mtime changed */
 		sf_i->force_restat = 1;
 	} else {
@@ -352,9 +346,9 @@ out:
  * page and it does not call SetPageUptodate for partial writes.
  */
 const struct address_space_operations vboxsf_reg_aops = {
-	.readpage = vboxsf_readpage,
+	.read_folio = vboxsf_read_folio,
 	.writepage = vboxsf_writepage,
-	.set_page_dirty = __set_page_dirty_nobuffers,
+	.dirty_folio = filemap_dirty_folio,
 	.write_begin = simple_write_begin,
 	.write_end = vboxsf_write_end,
 };

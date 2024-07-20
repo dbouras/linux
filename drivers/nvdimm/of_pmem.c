@@ -2,11 +2,11 @@
 
 #define pr_fmt(fmt) "of_pmem: " fmt
 
-#include <linux/of_platform.h>
-#include <linux/of_address.h>
+#include <linux/of.h>
 #include <linux/libnvdimm.h>
 #include <linux/module.h>
 #include <linux/ioport.h>
+#include <linux/platform_device.h>
 #include <linux/slab.h>
 
 struct of_pmem_private {
@@ -30,7 +30,13 @@ static int of_pmem_region_probe(struct platform_device *pdev)
 	if (!priv)
 		return -ENOMEM;
 
-	priv->bus_desc.provider_name = kstrdup(pdev->name, GFP_KERNEL);
+	priv->bus_desc.provider_name = devm_kstrdup(&pdev->dev, pdev->name,
+							GFP_KERNEL);
+	if (!priv->bus_desc.provider_name) {
+		kfree(priv);
+		return -ENOMEM;
+	}
+
 	priv->bus_desc.module = THIS_MODULE;
 	priv->bus_desc.of_node = np;
 
@@ -105,5 +111,6 @@ static struct platform_driver of_pmem_region_driver = {
 
 module_platform_driver(of_pmem_region_driver);
 MODULE_DEVICE_TABLE(of, of_pmem_region_match);
+MODULE_DESCRIPTION("NVDIMM Device Tree support");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("IBM Corporation");

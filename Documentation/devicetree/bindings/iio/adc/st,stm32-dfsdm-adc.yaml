@@ -59,6 +59,10 @@ properties:
       If not, SPI CLKOUT frequency will not be accurate.
     maximum: 20000000
 
+  access-controllers:
+    minItems: 1
+    maxItems: 2
+
 required:
   - compatible
   - reg
@@ -72,6 +76,7 @@ additionalProperties: false
 patternProperties:
   "^filter@[0-9]+$":
     type: object
+    unevaluatedProperties: false
     description: child node
 
     properties:
@@ -108,9 +113,7 @@ patternProperties:
           - [1-5]: order 1 to 5.
           For audio purpose it is recommended to use order 3 to 5.
         $ref: /schemas/types.yaml#/definitions/uint32
-        items:
-          minimum: 0
-          maximum: 5
+        maximum: 5
 
       "#io-channel-cells":
         const: 1
@@ -174,7 +177,7 @@ patternProperties:
               contains:
                 const: st,stm32-dfsdm-adc
 
-      - then:
+        then:
           properties:
             st,adc-channels:
               minItems: 1
@@ -206,7 +209,7 @@ patternProperties:
               contains:
                 const: st,stm32-dfsdm-dmic
 
-      - then:
+        then:
           properties:
             st,adc-channels:
               maxItems: 1
@@ -227,6 +230,7 @@ patternProperties:
           patternProperties:
             "^dfsdm-dai+$":
               type: object
+              additionalProperties: false
               description: child node
 
               properties:
@@ -242,6 +246,10 @@ patternProperties:
                     From common IIO binding. Used to pipe external sigma delta
                     modulator or internal ADC output to DFSDM channel.
 
+                port:
+                  $ref: /schemas/sound/audio-graph-port.yaml#
+                  unevaluatedProperties: false
+
               required:
                 - compatible
                 - "#sound-dai-cells"
@@ -254,7 +262,7 @@ allOf:
           contains:
             const: st,stm32h7-dfsdm
 
-  - then:
+    then:
       patternProperties:
         "^filter@[0-9]+$":
           properties:
@@ -269,7 +277,7 @@ allOf:
           contains:
             const: st,stm32mp1-dfsdm
 
-  - then:
+    then:
       patternProperties:
         "^filter@[0-9]+$":
           properties:

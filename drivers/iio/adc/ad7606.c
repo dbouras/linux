@@ -12,6 +12,7 @@
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/property.h>
 #include <linux/regulator/consumer.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -173,17 +174,14 @@ static int ad7606_read_raw(struct iio_dev *indio_dev,
 
 	switch (m) {
 	case IIO_CHAN_INFO_RAW:
-		ret = iio_device_claim_direct_mode(indio_dev);
-		if (ret)
-			return ret;
-
-		ret = ad7606_scan_direct(indio_dev, chan->address);
-		iio_device_release_direct_mode(indio_dev);
-
-		if (ret < 0)
-			return ret;
-		*val = (short)ret;
-		return IIO_VAL_INT;
+		iio_device_claim_direct_scoped(return -EBUSY, indio_dev) {
+			ret = ad7606_scan_direct(indio_dev, chan->address);
+			if (ret < 0)
+				return ret;
+			*val = (short) ret;
+			return IIO_VAL_INT;
+		}
+		unreachable();
 	case IIO_CHAN_INFO_SCALE:
 		if (st->sw_mode_en)
 			ch = chan->address;
@@ -476,7 +474,7 @@ static irqreturn_t ad7606_interrupt(int irq, void *dev_id)
 
 	if (iio_buffer_enabled(indio_dev)) {
 		gpiod_set_value(st->gpio_convst, 0);
-		iio_trigger_poll_chained(st->trig);
+		iio_trigger_poll_nested(st->trig);
 	} else {
 		complete(&st->completion);
 	}
@@ -556,13 +554,6 @@ static const struct iio_trigger_ops ad7606_trigger_ops = {
 	.validate_device = iio_trigger_validate_own_device,
 };
 
-static void ad7606_regulator_disable(void *data)
-{
-	struct ad7606_state *st = data;
-
-	regulator_disable(st->reg);
-}
-
 int ad7606_probe(struct device *dev, int irq, void __iomem *base_address,
 		 const char *name, unsigned int id,
 		 const struct ad7606_bus_ops *bops)
@@ -588,19 +579,10 @@ int ad7606_probe(struct device *dev, int irq, void __iomem *base_address,
 	st->scale_avail = ad7606_scale_avail;
 	st->num_scales = ARRAY_SIZE(ad7606_scale_avail);
 
-	st->reg = devm_regulator_get(dev, "avcc");
-	if (IS_ERR(st->reg))
-		return PTR_ERR(st->reg);
-
-	ret = regulator_enable(st->reg);
-	if (ret) {
-		dev_err(dev, "Failed to enable specified AVcc supply\n");
-		return ret;
-	}
-
-	ret = devm_add_action_or_reset(dev, ad7606_regulator_disable, st);
+	ret = devm_regulator_get_enable(dev, "avcc");
 	if (ret)
-		return ret;
+		return dev_err_probe(dev, ret,
+				     "Failed to enable specified AVcc supply\n");
 
 	st->chip_info = &ad7606_chip_info_tbl[id];
 
@@ -693,7 +675,7 @@ int ad7606_probe(struct device *dev, int irq, void __iomem *base_address,
 
 	return devm_iio_device_register(dev, indio_dev);
 }
-EXPORT_SYMBOL_GPL(ad7606_probe);
+EXPORT_SYMBOL_NS_GPL(ad7606_probe, IIO_AD7606);
 
 #ifdef CONFIG_PM_SLEEP
 
@@ -725,7 +707,7 @@ static int ad7606_resume(struct device *dev)
 }
 
 SIMPLE_DEV_PM_OPS(ad7606_pm_ops, ad7606_suspend, ad7606_resume);
-EXPORT_SYMBOL_GPL(ad7606_pm_ops);
+EXPORT_SYMBOL_NS_GPL(ad7606_pm_ops, IIO_AD7606);
 
 #endif
 

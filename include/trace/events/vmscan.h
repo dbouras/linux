@@ -96,14 +96,14 @@ TRACE_EVENT(mm_vmscan_wakeup_kswapd,
 		__field(	int,	nid		)
 		__field(	int,	zid		)
 		__field(	int,	order		)
-		__field(	gfp_t,	gfp_flags	)
+		__field(	unsigned long,	gfp_flags	)
 	),
 
 	TP_fast_assign(
 		__entry->nid		= nid;
 		__entry->zid		= zid;
 		__entry->order		= order;
-		__entry->gfp_flags	= gfp_flags;
+		__entry->gfp_flags	= (__force unsigned long)gfp_flags;
 	),
 
 	TP_printk("nid=%d order=%d gfp_flags=%s",
@@ -120,12 +120,12 @@ DECLARE_EVENT_CLASS(mm_vmscan_direct_reclaim_begin_template,
 
 	TP_STRUCT__entry(
 		__field(	int,	order		)
-		__field(	gfp_t,	gfp_flags	)
+		__field(	unsigned long,	gfp_flags	)
 	),
 
 	TP_fast_assign(
 		__entry->order		= order;
-		__entry->gfp_flags	= gfp_flags;
+		__entry->gfp_flags	= (__force unsigned long)gfp_flags;
 	),
 
 	TP_printk("order=%d gfp_flags=%s",
@@ -210,7 +210,7 @@ TRACE_EVENT(mm_shrink_slab_start,
 		__field(void *, shrink)
 		__field(int, nid)
 		__field(long, nr_objects_to_shrink)
-		__field(gfp_t, gfp_flags)
+		__field(unsigned long, gfp_flags)
 		__field(unsigned long, cache_items)
 		__field(unsigned long long, delta)
 		__field(unsigned long, total_scan)
@@ -222,7 +222,7 @@ TRACE_EVENT(mm_shrink_slab_start,
 		__entry->shrink = shr->scan_objects;
 		__entry->nid = sc->nid;
 		__entry->nr_objects_to_shrink = nr_objects_to_shrink;
-		__entry->gfp_flags = sc->gfp_mask;
+		__entry->gfp_flags = (__force unsigned long)sc->gfp_mask;
 		__entry->cache_items = cache_items;
 		__entry->delta = delta;
 		__entry->total_scan = total_scan;
@@ -285,10 +285,9 @@ TRACE_EVENT(mm_vmscan_lru_isolate,
 		unsigned long nr_scanned,
 		unsigned long nr_skipped,
 		unsigned long nr_taken,
-		isolate_mode_t isolate_mode,
 		int lru),
 
-	TP_ARGS(highest_zoneidx, order, nr_requested, nr_scanned, nr_skipped, nr_taken, isolate_mode, lru),
+	TP_ARGS(highest_zoneidx, order, nr_requested, nr_scanned, nr_skipped, nr_taken, lru),
 
 	TP_STRUCT__entry(
 		__field(int, highest_zoneidx)
@@ -297,7 +296,6 @@ TRACE_EVENT(mm_vmscan_lru_isolate,
 		__field(unsigned long, nr_scanned)
 		__field(unsigned long, nr_skipped)
 		__field(unsigned long, nr_taken)
-		__field(isolate_mode_t, isolate_mode)
 		__field(int, lru)
 	),
 
@@ -308,7 +306,6 @@ TRACE_EVENT(mm_vmscan_lru_isolate,
 		__entry->nr_scanned = nr_scanned;
 		__entry->nr_skipped = nr_skipped;
 		__entry->nr_taken = nr_taken;
-		__entry->isolate_mode = isolate_mode;
 		__entry->lru = lru;
 	),
 
@@ -316,8 +313,7 @@ TRACE_EVENT(mm_vmscan_lru_isolate,
 	 * classzone is previous name of the highest_zoneidx.
 	 * Reason not to change it is the ABI requirement of the tracepoint.
 	 */
-	TP_printk("isolate_mode=%d classzone=%d order=%d nr_requested=%lu nr_scanned=%lu nr_skipped=%lu nr_taken=%lu lru=%s",
-		__entry->isolate_mode,
+	TP_printk("classzone=%d order=%d nr_requested=%lu nr_scanned=%lu nr_skipped=%lu nr_taken=%lu lru=%s",
 		__entry->highest_zoneidx,
 		__entry->order,
 		__entry->nr_requested,
@@ -327,11 +323,11 @@ TRACE_EVENT(mm_vmscan_lru_isolate,
 		__print_symbolic(__entry->lru, LRU_NAMES))
 );
 
-TRACE_EVENT(mm_vmscan_writepage,
+TRACE_EVENT(mm_vmscan_write_folio,
 
-	TP_PROTO(struct page *page),
+	TP_PROTO(struct folio *folio),
 
-	TP_ARGS(page),
+	TP_ARGS(folio),
 
 	TP_STRUCT__entry(
 		__field(unsigned long, pfn)
@@ -339,9 +335,9 @@ TRACE_EVENT(mm_vmscan_writepage,
 	),
 
 	TP_fast_assign(
-		__entry->pfn = page_to_pfn(page);
+		__entry->pfn = folio_pfn(folio);
 		__entry->reclaim_flags = trace_reclaim_flags(
-						page_is_file_lru(page));
+						folio_is_file_lru(folio));
 	),
 
 	TP_printk("page=%p pfn=0x%lx flags=%s",
@@ -446,13 +442,13 @@ TRACE_EVENT(mm_vmscan_node_reclaim_begin,
 	TP_STRUCT__entry(
 		__field(int, nid)
 		__field(int, order)
-		__field(gfp_t, gfp_flags)
+		__field(unsigned long, gfp_flags)
 	),
 
 	TP_fast_assign(
 		__entry->nid = nid;
 		__entry->order = order;
-		__entry->gfp_flags = gfp_flags;
+		__entry->gfp_flags = (__force unsigned long)gfp_flags;
 	),
 
 	TP_printk("nid=%d order=%d gfp_flags=%s",

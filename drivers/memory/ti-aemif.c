@@ -328,7 +328,6 @@ static int aemif_probe(struct platform_device *pdev)
 {
 	int i;
 	int ret = -ENODEV;
-	struct resource *res;
 	struct device *dev = &pdev->dev;
 	struct device_node *np = dev->of_node;
 	struct device_node *child_np;
@@ -362,8 +361,7 @@ static int aemif_probe(struct platform_device *pdev)
 	else if (pdata)
 		aemif->cs_offset = pdata->cs_offset;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	aemif->base = devm_ioremap_resource(dev, res);
+	aemif->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(aemif->base)) {
 		ret = PTR_ERR(aemif->base);
 		goto error;
@@ -429,17 +427,16 @@ error:
 	return ret;
 }
 
-static int aemif_remove(struct platform_device *pdev)
+static void aemif_remove(struct platform_device *pdev)
 {
 	struct aemif_device *aemif = platform_get_drvdata(pdev);
 
 	clk_disable_unprepare(aemif->clk);
-	return 0;
 }
 
 static struct platform_driver aemif_driver = {
 	.probe = aemif_probe,
-	.remove = aemif_remove,
+	.remove_new = aemif_remove,
 	.driver = {
 		.name = "ti-aemif",
 		.of_match_table = of_match_ptr(aemif_of_match),

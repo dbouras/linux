@@ -6,7 +6,6 @@
 #include <linux/init.h>
 #include <linux/kern_levels.h>
 #include <linux/linkage.h>
-#include <linux/cache.h>
 #include <linux/ratelimit_types.h>
 #include <linux/once_lite.h>
 
@@ -45,8 +44,6 @@ static inline const char *printk_skip_headers(const char *buffer)
 	return buffer;
 }
 
-#define CONSOLE_EXT_LOG_MAX	8192
-
 /* printk's without a loglevel use this.. */
 #define MESSAGE_LOGLEVEL_DEFAULT CONFIG_MESSAGE_LOGLEVEL_DEFAULT
 
@@ -63,6 +60,10 @@ static inline const char *printk_skip_headers(const char *buffer)
 #define CONSOLE_LOGLEVEL_DEFAULT CONFIG_CONSOLE_LOGLEVEL_DEFAULT
 #define CONSOLE_LOGLEVEL_QUIET	 CONFIG_CONSOLE_LOGLEVEL_QUIET
 
+int match_devname_and_update_preferred_console(const char *match,
+					       const char *name,
+					       const short idx);
+
 extern int console_printk[];
 
 #define console_loglevel (console_printk[0])
@@ -74,7 +75,7 @@ extern void console_verbose(void);
 
 /* strlen("ratelimit") + 1 */
 #define DEVKMSG_STR_MAX_SIZE 10
-extern char devkmsg_log_str[];
+extern char devkmsg_log_str[DEVKMSG_STR_MAX_SIZE];
 struct ctl_table;
 
 extern int suppress_printk;
@@ -129,7 +130,7 @@ struct va_format {
 #define no_printk(fmt, ...)				\
 ({							\
 	if (0)						\
-		printk(fmt, ##__VA_ARGS__);		\
+		_printk(fmt, ##__VA_ARGS__);		\
 	0;						\
 })
 
@@ -195,6 +196,7 @@ void show_regs_print_info(const char *log_lvl);
 extern asmlinkage void dump_stack_lvl(const char *log_lvl) __cold;
 extern asmlinkage void dump_stack(void) __cold;
 void printk_trigger_flush(void);
+void console_replay_all(void);
 #else
 static inline __printf(1, 0)
 int vprintk(const char *s, va_list args)
@@ -274,48 +276,65 @@ static inline void dump_stack(void)
 static inline void printk_trigger_flush(void)
 {
 }
+static inline void console_replay_all(void)
+{
+}
 #endif
 
+bool this_cpu_in_panic(void);
+
 #ifdef CONFIG_SMP
-extern int __printk_cpu_trylock(void);
-extern void __printk_wait_on_cpu_lock(void);
-extern void __printk_cpu_unlock(void);
-
-/**
- * printk_cpu_lock_irqsave() - Acquire the printk cpu-reentrant spinning
- *                             lock and disable interrupts.
- * @flags: Stack-allocated storage for saving local interrupt state,
- *         to be passed to printk_cpu_unlock_irqrestore().
- *
- * If the lock is owned by another CPU, spin until it becomes available.
- * Interrupts are restored while spinning.
- */
-#define printk_cpu_lock_irqsave(flags)		\
-	for (;;) {				\
-		local_irq_save(flags);		\
-		if (__printk_cpu_trylock())	\
-			break;			\
-		local_irq_restore(flags);	\
-		__printk_wait_on_cpu_lock();	\
-	}
-
-/**
- * printk_cpu_unlock_irqrestore() - Release the printk cpu-reentrant spinning
- *                                  lock and restore interrupts.
- * @flags: Caller's saved interrupt state, from printk_cpu_lock_irqsave().
- */
-#define printk_cpu_unlock_irqrestore(flags)	\
-	do {					\
-		__printk_cpu_unlock();		\
-		local_irq_restore(flags);	\
-	} while (0)				\
+extern int __printk_cpu_sync_try_get(void);
+extern void __printk_cpu_sync_wait(void);
+extern void __printk_cpu_sync_put(void);
 
 #else
 
-#define printk_cpu_lock_irqsave(flags) ((void)flags)
-#define printk_cpu_unlock_irqrestore(flags) ((void)flags)
-
+#define __printk_cpu_sync_try_get() true
+#define __printk_cpu_sync_wait()
+#define __printk_cpu_sync_put()
 #endif /* CONFIG_SMP */
+
+/**
+ * printk_cpu_sync_get_irqsave() - Disable interrupts and acquire the printk
+ *                                 cpu-reentrant spinning lock.
+ * @flags: Stack-allocated storage for saving local interrupt state,
+ *         to be passed to printk_cpu_sync_put_irqrestore().
+ *
+ * If the lock is owned by another CPU, spin until it becomes available.
+ * Interrupts are restored while spinning.
+ *
+ * CAUTION: This function must be used carefully. It does not behave like a
+ * typical lock. Here are important things to watch out for...
+ *
+ *     * This function is reentrant on the same CPU. Therefore the calling
+ *       code must not assume exclusive access to data if code accessing the
+ *       data can run reentrant or within NMI context on the same CPU.
+ *
+ *     * If there exists usage of this function from NMI context, it becomes
+ *       unsafe to perform any type of locking or spinning to wait for other
+ *       CPUs after calling this function from any context. This includes
+ *       using spinlocks or any other busy-waiting synchronization methods.
+ */
+#define printk_cpu_sync_get_irqsave(flags)		\
+	for (;;) {					\
+		local_irq_save(flags);			\
+		if (__printk_cpu_sync_try_get())	\
+			break;				\
+		local_irq_restore(flags);		\
+		__printk_cpu_sync_wait();		\
+	}
+
+/**
+ * printk_cpu_sync_put_irqrestore() - Release the printk cpu-reentrant spinning
+ *                                    lock and restore interrupts.
+ * @flags: Caller's saved interrupt state, from printk_cpu_sync_get_irqsave().
+ */
+#define printk_cpu_sync_put_irqrestore(flags)	\
+	do {					\
+		__printk_cpu_sync_put();	\
+		local_irq_restore(flags);	\
+	} while (0)
 
 extern int kptr_restrict;
 

@@ -755,7 +755,7 @@ static int __maybe_unused bam_dmux_runtime_resume(struct device *dev)
 		return 0;
 
 	dmux->tx = dma_request_chan(dev, "tx");
-	if (IS_ERR(dmux->rx)) {
+	if (IS_ERR(dmux->tx)) {
 		dev_err(dev, "Failed to request TX DMA channel: %pe\n", dmux->tx);
 		dmux->tx = NULL;
 		bam_dmux_runtime_suspend(dev);
@@ -846,7 +846,7 @@ static int bam_dmux_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int bam_dmux_remove(struct platform_device *pdev)
+static void bam_dmux_remove(struct platform_device *pdev)
 {
 	struct bam_dmux *dmux = platform_get_drvdata(pdev);
 	struct device *dev = dmux->dev;
@@ -877,8 +877,6 @@ static int bam_dmux_remove(struct platform_device *pdev)
 	disable_irq(dmux->pc_irq);
 	bam_dmux_power_off(dmux);
 	bam_dmux_free_skbs(dmux->tx_skbs, DMA_TO_DEVICE);
-
-	return 0;
 }
 
 static const struct dev_pm_ops bam_dmux_pm_ops = {
@@ -893,7 +891,7 @@ MODULE_DEVICE_TABLE(of, bam_dmux_of_match);
 
 static struct platform_driver bam_dmux_driver = {
 	.probe = bam_dmux_probe,
-	.remove = bam_dmux_remove,
+	.remove_new = bam_dmux_remove,
 	.driver = {
 		.name = "bam-dmux",
 		.pm = &bam_dmux_pm_ops,
